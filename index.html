@@ -25,6 +25,10 @@
     @keyframes flash { 0% { background: rgba(251, 191, 36, 0.5); } 100% { background: transparent; } }
     select { text-overflow: ellipsis; }
     .cursor-pointer { cursor: pointer; }
+    
+    /* 新增：修正 iOS 畫面無法填滿的問題 */
+    #reader { width: 100%; display: flex; justify-content: center; overflow: hidden; }
+    #reader video { width: 100% !important; object-fit: cover !important; }
   </style>
 </head>
 <body>
@@ -71,7 +75,6 @@
       const [feedback, setFeedback] = useState('');
       
       const scannerRef = useRef(null);
-      const fileInputRef = useRef(null);
 
       const [showAdmin, setShowAdmin] = useState(false);
       const [showSummary, setShowSummary] = useState(false);
@@ -85,7 +88,6 @@
         dataRef.current = { masterData, manualBinds, inventory, currentLocation }; 
       }, [masterData, manualBinds, inventory, currentLocation]);
 
-      // 🌐 雲端同步
       useEffect(() => {
         if (!db) return;
         const unsubscribe = db.collection('inventory_sessions').doc('current').onSnapshot((doc) => {
@@ -124,8 +126,14 @@
             { facingMode: "environment" },
             { 
               fps: 10, 
-              qrbox: { width: 280, height: 160 },
-              aspectRatio: 1.0, 
+              // 修正：使用動態計算掃描框大小，佔滿畫面寬度的 85%
+              qrbox: (viewfinderWidth, viewfinderHeight) => {
+                  return {
+                      width: Math.floor(viewfinderWidth * 0.85),
+                      height: 250 // 加大高度，讓條碼更容易進入範圍
+                  };
+              },
+              // 修正：移除 aspectRatio: 1.0，讓相機以手機原生比例呈現（通常是 4:3 或 16:9）
               videoConstraints: { facingMode: "environment" } 
             },
             (decodedText) => { 
@@ -136,7 +144,6 @@
               const code = String(decodedText).trim(); 
               setScannedBarcode(code);
               
-              // 取消自動新增功能，改為只查詢並帶入資料供使用者手動確認
               const { masterData, manualBinds } = dataRef.current;
               const found = masterData.find(m => String(m.barcode) === code) || manualBinds[code];
               setCurrentItem(found || null);
@@ -146,7 +153,6 @@
                   setUnknownBarcode(code);
               }
 
-              // 掃描到條碼後立即終止掃描
               if (scannerRef.current) {
                   scannerRef.current.stop().then(() => {
                       const gate = document.getElementById('cam-gate');
@@ -191,7 +197,6 @@
         setTimeout(() => setFeedback(''), 2000);
       };
 
-      // 調整下方清單數量的函式
       const updateInventoryQty = (index, delta) => {
           let newInv = [...inventory];
           const newQty = newInv[index].qty + delta;
@@ -262,7 +267,8 @@
               <button onClick={() => setShowAdmin(true)} className="bg-slate-900 text-slate-400 px-4 py-2 rounded-xl border border-slate-800 text-xs font-bold">⚙️ 管理</button>
           </header>
 
-          <section className="relative w-full aspect-square bg-black overflow-hidden border-b border-slate-900 shadow-xl">
+          {/* 修正：移除 aspect-square，改用 min-h-[40vh] 讓相機畫面有更多空間伸展 */}
+          <section className="relative w-full min-h-[40vh] bg-black overflow-hidden border-b border-slate-900 shadow-xl flex items-center justify-center">
               <div id="reader" className="w-full h-full"></div>
               <div id="cam-gate" className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950">
                   <button onClick={startScanner} className="bg-yellow-500 text-black px-12 py-5 rounded-2xl font-black text-xl shadow-[0_0_30px_rgba(234,179,8,0.2)] active:scale-95 transition-all">
@@ -319,7 +325,6 @@
                             <div className="text-[10px] text-slate-500 font-mono mt-1">{i.barcode} • {i.time}</div>
                         </div>
                         
-                        {/* 修改：增加數量調整按鈕介面 */}
                         <div className="flex items-center gap-2">
                             <div className="flex items-center bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
                                 <button onClick={() => updateInventoryQty(idx, -1)} className="px-3 py-1 text-slate-300 hover:bg-slate-600 hover:text-white transition-colors text-lg font-bold">-</button>
