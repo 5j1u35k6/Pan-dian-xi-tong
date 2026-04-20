@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V6.6</title>
+  <title>CUPICHO PRO V6.7</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -19,19 +19,28 @@
   <style>
     body { background-color: #020617; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent;}
     .glass-card { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(51, 65, 85, 0.5); backdrop-filter: blur(12px); }
-    .modal-overlay { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.95); backdrop-filter: blur(15px); z-index: 50; display: flex; flex-direction: column; padding: 24px; animation: slideUp 0.3s ease-out; overflow-y: auto;}
+    
+    /* 👑 修正核心：將 z-index 提高到 2000，並增加底部安全留白，避免被任何固定區塊遮擋 */
+    .modal-overlay { 
+        position: fixed; inset: 0; 
+        background: rgba(2, 6, 23, 0.95); backdrop-filter: blur(15px); 
+        z-index: 2000; 
+        display: flex; flex-direction: column; 
+        padding: 24px; 
+        padding-bottom: max(40px, env(safe-area-inset-bottom)); 
+        animation: slideUp 0.3s ease-out; overflow-y: auto;
+    }
+    
     @keyframes slideUp { from { transform: translateY(30%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
     .flash-active { animation: flash 0.3s ease-out; }
     @keyframes flash { 0% { background: rgba(251, 191, 36, 0.5); } 100% { background: transparent; } }
     select { text-overflow: ellipsis; }
     .cursor-pointer { cursor: pointer; }
     
-    /* 隱藏數字輸入框的原生上下箭頭 */
     input[type=number]::-webkit-inner-spin-button, 
     input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     
     #reader { width: 100%; display: flex; justify-content: center; overflow: hidden; position: relative; }
-    /* iOS 優化：稍微放大畫面 1.2 倍，強迫操作者將手機拿遠至 15~20cm 對焦段 */
     #reader video { width: 100% !important; object-fit: cover !important; transform: scale(1.2); }
   </style>
 </head>
@@ -75,7 +84,6 @@
       const [currentLocation, setCurrentLocation] = useState(LOCATIONS[0]);      
       const [scannedBarcode, setScannedBarcode] = useState('');
       const [currentItem, setCurrentItem] = useState(null); 
-      // 修正：預設數量改為空白字串
       const [qty, setQty] = useState('');
       const [feedback, setFeedback] = useState('');
       const [isScanning, setIsScanning] = useState(false);
@@ -94,7 +102,6 @@
         dataRef.current = { masterData, manualBinds, inventory, currentLocation }; 
       }, [masterData, manualBinds, inventory, currentLocation]);
 
-      // 🌐 雲端同步：盤點資料
       useEffect(() => {
         if (!db) return;
         const unsubscribe = db.collection('inventory_sessions').doc('current').onSnapshot((doc) => {
@@ -107,7 +114,6 @@
         return () => unsubscribe();
       }, []);
 
-      // 🌐 雲端同步：全域未知商品綁定紀錄 (解決不同手機掃描同一未知條碼的問題)
       useEffect(() => {
         if (!db) return;
         const unsubscribeBinds = db.collection('inventory_settings').doc('global_binds').onSnapshot((doc) => {
@@ -134,7 +140,6 @@
         }
       };
 
-      // 儲存綁定到雲端
       const saveBindsToCloud = (newBinds) => {
         setManualBinds(newBinds);
         localStorage.setItem('cup_binds', JSON.stringify(newBinds));
@@ -166,8 +171,6 @@
                   Html5QrcodeSupportedFormats.EAN_8,
                   Html5QrcodeSupportedFormats.QR_CODE
               ],
-              // 移除會干擾 iOS 原生對焦的 advanced: [{ focusMode: "continuous" }] 參數
-              // 請求標準的 HD 畫質即可，讓手機原生相機模組決定焦段
               videoConstraints: { 
                   facingMode: "environment",
                   width: { ideal: 1920 }, 
@@ -185,7 +188,7 @@
               const { masterData, manualBinds } = dataRef.current;
               const found = masterData.find(m => String(m.barcode) === code) || manualBinds[code];
               setCurrentItem(found || null);
-              setQty(''); // 掃描後預設空白
+              setQty('');
 
               if (!found) {
                   setUnknownBarcode(code);
@@ -236,11 +239,10 @@
         setFeedback(`✅ 已送出: ${item.name} (${parsedQty}件)`);
         setScannedBarcode('');
         setCurrentItem(null); 
-        setQty(''); // 送出後還原為空白
+        setQty(''); 
         setTimeout(() => setFeedback(''), 2500);
       };
 
-      // 歷史清單：按鈕加減數量
       const updateInventoryQty = (index, delta) => {
           let newInv = [...inventory];
           let currentQty = parseInt(newInv[index].qty, 10) || 0;
@@ -251,19 +253,17 @@
           }
       };
 
-      // 歷史清單：直接輸入數字時即時更新畫面
       const setInventoryItemQtyText = (index, val) => {
           let newInv = [...inventory];
-          newInv[index].qty = val; // 允許暫存為字串（如空字串）
-          setInventory(newInv); // 這裡不立刻存入雲端，避免打字到一半跳走
+          newInv[index].qty = val; 
+          setInventory(newInv); 
       };
 
-      // 歷史清單：輸入框失焦時確認數字並存雲端
       const handleQtyBlur = (index) => {
           let newInv = [...inventory];
           const parsed = parseInt(newInv[index].qty, 10);
           if (isNaN(parsed) || parsed <= 0) {
-              newInv[index].qty = 1; // 亂填或空白，防呆自動補1
+              newInv[index].qty = 1; 
           } else {
               newInv[index].qty = parsed;
           }
@@ -379,7 +379,6 @@
 
                   <div className="grid grid-cols-4 gap-3">
                       <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="col-span-3 bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500" placeholder="手動輸入條碼" />
-                      {/* 數量輸入框：預設空白 */}
                       <input type="number" value={qty} onChange={e => setQty(e.target.value)} className="col-span-1 bg-black border border-slate-700 rounded-2xl p-4 text-2xl font-black text-center text-yellow-500 outline-none focus:border-yellow-500 placeholder-slate-700" placeholder="數量" />
                       <button onClick={handleAddRecord} className="col-span-4 bg-gradient-to-br from-yellow-400 to-yellow-600 text-black py-5 rounded-2xl active:scale-95 text-xl font-bold shadow-lg">確認送出</button>
                   </div>
@@ -396,7 +395,6 @@
                     <div key={idx} className="glass-card p-4 rounded-3xl flex justify-between items-center shadow-sm">
                         <div className="flex-1 pr-3">
                             <div className="flex flex-col items-start gap-1 mb-1">
-                                {/* 加大顯示區域的寬度 */}
                                 <div className="relative inline-block w-full max-w-[160px]">
                                     <select
                                         value={i.location}
@@ -415,7 +413,6 @@
                         <div className="flex items-center gap-2">
                             <div className="flex items-center bg-slate-800 rounded-lg overflow-hidden border border-slate-700 flex-shrink-0">
                                 <button onClick={() => updateInventoryQty(idx, -1)} className="px-3 py-2 text-slate-300 hover:bg-slate-600 hover:text-white transition-colors text-lg font-bold">-</button>
-                                {/* 歷史清單數量：改為可以直接點擊輸入 */}
                                 <input 
                                     type="number" 
                                     value={i.qty} 
@@ -453,14 +450,13 @@
           {unknownBarcode && (
             <div className="modal-overlay">
                 <div className="flex items-center justify-center mb-6 relative">
-                    {/* 左上角極度明顯的返回按鈕 */}
                     <button onClick={() => setUnknownBarcode(null)} className="absolute left-0 top-0 bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-xl font-bold flex items-center gap-2 text-sm z-20 shadow-[0_0_15px_rgba(220,38,38,0.4)]">
                         ⬅ 返回
                     </button>
                     <h3 className="text-lg font-bold text-white pointer-events-none mt-1.5">⚠️ 未知商品</h3>
                 </div>
                 
-                <div className="bg-yellow-500/10 border border-yellow-500/30 p-4 rounded-2xl mb-6 text-center mt-2">
+                <div className="bg-yellow-500/10 border border-yellow-500/30 p-4 rounded-2xl mb-6 text-center mt-2 flex-shrink-0">
                     <p className="text-[10px] text-yellow-500 mb-1">掃描到的條碼</p>
                     <p className="text-2xl font-mono font-bold text-white">{unknownBarcode}</p>
                 </div>
@@ -540,7 +536,7 @@
                     )
                   })}
                 </div>
-                <button onClick={() => setShowSummary(false)} className="mt-6 w-full bg-slate-800 text-white py-4 rounded-2xl font-bold shadow-lg">返回盤點</button>
+                <button onClick={() => setShowSummary(false)} className="mt-6 w-full bg-slate-800 text-white py-4 rounded-2xl font-bold shadow-lg flex-shrink-0">返回盤點</button>
             </div>
           )}
 
