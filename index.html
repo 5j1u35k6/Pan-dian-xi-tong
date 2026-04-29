@@ -78,8 +78,6 @@
 
     function App() {
       const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master')) || []);
-      // 👑 保存原始矩陣資料，避免重複欄位名稱造成的資料丟失
-      const [rawMasterRows, setRawMasterRows] = useState(() => JSON.parse(localStorage.getItem('cup_raw_rows')) || []);
       const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
       const [manualBinds, setManualBinds] = useState(() => JSON.parse(localStorage.getItem('cup_binds')) || {});
       const [completedLocations, setCompletedLocations] = useState(() => JSON.parse(localStorage.getItem('cup_completed_locs')) || []);
@@ -139,14 +137,12 @@
                     setMasterData(data.items);
                     localStorage.setItem('cup_master', JSON.stringify(data.items));
                 }
-                if (data.rawRows) {
-                    setRawMasterRows(data.rawRows);
-                    localStorage.setItem('cup_raw_rows', JSON.stringify(data.rawRows));
-                }
             }
         });
         return () => unsubscribeMaster();
       }, []);
+
+      useEffect(() => { localStorage.setItem('cup_completed_locs', JSON.stringify(completedLocations)); }, [completedLocations]);
 
       const saveInventory = (newInv) => {
         setInventory(newInv);
@@ -159,6 +155,15 @@
         }
       };
 
+      const saveBindsToCloud = (newBinds) => {
+        setManualBinds(newBinds);
+        localStorage.setItem('cup_binds', JSON.stringify(newBinds));
+        if (db) {
+            db.collection('inventory_settings').doc('global_binds').set({ binds: newBinds }, { merge: true })
+              .catch(e => console.error("綁定同步失敗", e));
+        }
+      };
+
       const startScanner = async () => {
         const gate = document.getElementById('cam-gate');
         if (gate) gate.style.display = 'none';
@@ -166,137 +171,215 @@
         setNameSearchResults([]);
         if (!scannerRef.current) scannerRef.current = new Html5Qrcode("reader");
         try {
-          await scannerRef.current.start({ facingMode: "environment" }, { fps: 10, qrbox: (vw, vh) => ({ width: Math.floor(vw * 0.85), height: 250 }), formatsToSupport: [Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.CODE_128, Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.QR_CODE], videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } }, (decodedText) => { 
-              const f = document.getElementById('flash-overlay'); if(f) { f.classList.add('flash-active'); setTimeout(() => f.classList.remove('flash-active'), 300); }
-              const code = String(decodedText).trim(); setScannedBarcode(code);
+          await scannerRef.current.start(
+            { facingMode: "environment" },
+            { 
+              fps: 10, 
+              qrbox: (viewfinderWidth, viewfinderHeight) => {
+                  return { width: Math.floor(viewfinderWidth * 0.85), height: 250 };
+              },
+              formatsToSupport: [
+                  Html5QrcodeSupportedFormats.CODE_39,
+                  Html5QrcodeSupportedFormats.CODE_128,
+                  Html5QrcodeSupportedFormats.EAN_13,
+                  Html5QrcodeSupportedFormats.EAN_8,
+                  Html5QrcodeSupportedFormats.QR_CODE
+              ],
+              videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } 
+            },
+            (decodedText) => { 
+              const f = document.getElementById('flash-overlay'); 
+              if(f) { f.classList.add('flash-active'); setTimeout(() => f.classList.remove('flash-active'), 300); }
+              if (navigator.vibrate) navigator.vibrate(80);
+              const code = String(decodedText).trim(); 
+              setScannedBarcode(code);
               const { masterData, manualBinds } = dataRef.current;
               const found = masterData.find(m => String(m.barcode) === code || String(m.id) === code) || manualBinds[code];
-              setCurrentItem(found || null); setQty('');
+              setCurrentItem(found || null);
+              setQty('');
               if (!found) setUnknownBarcode(code);
-              if (scannerRef.current) scannerRef.current.stop().then(() => { setIsScanning(false); const gate = document.getElementById('cam-gate'); if (gate) gate.style.display = 'flex'; });
+              if (scannerRef.current) {
+                  scannerRef.current.stop().then(() => {
+                      setIsScanning(false);
+                      const gate = document.getElementById('cam-gate');
+                      if (gate) gate.style.display = 'flex';
+                  }).catch(err => console.error("停止相機失敗", err));
+              }
             }
           );
-        } catch (err) { alert("相機啟動失敗：" + err); setIsScanning(false); }
+        } catch (err) { 
+            alert("相機啟動失敗：" + err);
+            setIsScanning(false);
+            if (gate) gate.style.display = 'flex';
+        }
       };
 
       const handleManualInput = (text) => {
           setScannedBarcode(text);
           const exactMatch = masterData.find(m => String(m.barcode) === text || String(m.id) === text) || manualBinds[text];
-          if (exactMatch) { setCurrentItem(exactMatch); setNameSearchResults([]); } else {
+          if (exactMatch) {
+              setCurrentItem(exactMatch);
+              setNameSearchResults([]); 
+          } else {
               setCurrentItem(null);
               if (text.length > 0) {
-                  const results = masterData.filter(m => m.name.toLowerCase().includes(text.toLowerCase()) || String(m.barcode).includes(text) || String(m.id).includes(text)).slice(0, 15);
+                  const results = masterData.filter(m => 
+                      m.name.toLowerCase().includes(text.toLowerCase()) || 
+                      String(m.barcode).includes(text) ||
+                      String(m.id).includes(text)
+                  ).slice(0, 15);
                   setNameSearchResults(results);
-              } else setNameSearchResults([]);
+              } else {
+                  setNameSearchResults([]);
+              }
           }
       };
 
+      const selectSearchResult = (item) => {
+          setScannedBarcode(item.id !== '0' ? item.id : item.barcode);
+          setCurrentItem(item);
+          setNameSearchResults([]);
+      };
+
       const handleAddRecord = () => {
+        if (nameSearchResults.length > 0 && !currentItem) return alert("請選擇正確商品！");
         const parsedQty = parseInt(qty, 10);
-        if (!scannedBarcode || isNaN(parsedQty) || parsedQty <= 0) return alert("請輸入有效的條碼與數量！");
+        if (!scannedBarcode) return alert("請輸入資訊！");
+        if (isNaN(parsedQty) || parsedQty <= 0) return alert("請輸入有效數量！");
         const item = currentItem || { id: "NEW", name: "未知商品" };
         const existingIdx = inventory.findIndex(i => i.barcode === scannedBarcode && i.location === currentLocation);
         let newInv = [...inventory];
         if (existingIdx > -1) {
-            newInv[existingIdx].qty += parsedQty; newInv[existingIdx].time = new Date().toLocaleTimeString();
-            const updated = newInv.splice(existingIdx, 1)[0]; newInv.unshift(updated);
-        } else newInv.unshift({ ...item, barcode: scannedBarcode, qty: parsedQty, location: currentLocation, time: new Date().toLocaleTimeString() });
-        saveInventory(newInv); setFeedback(`✅ 已送出: ${item.name}`); setScannedBarcode(''); setCurrentItem(null); setQty(''); setTimeout(() => setFeedback(''), 2500);
+            newInv[existingIdx].qty += parsedQty;
+            newInv[existingIdx].time = new Date().toLocaleTimeString();
+            newInv.unshift(newInv.splice(existingIdx, 1)[0]);
+        } else {
+            newInv.unshift({ ...item, barcode: scannedBarcode, qty: parsedQty, location: currentLocation, time: new Date().toLocaleTimeString() });
+        }
+        saveInventory(newInv);
+        setFeedback(`✅ 已送出: ${item.name}`);
+        setScannedBarcode(''); setCurrentItem(null); setQty(''); 
+        setTimeout(() => setFeedback(''), 2500);
       };
 
-      // 👑 修正：矩陣座標式讀取
+      const updateInventoryQty = (index, delta) => {
+          let newInv = [...inventory];
+          let currentQty = parseInt(newInv[index].qty, 10) || 0;
+          if (currentQty + delta > 0) {
+              newInv[index].qty = currentQty + delta;
+              saveInventory(newInv);
+          }
+      };
+
+      const handleQtyBlur = (index) => {
+          let newInv = [...inventory];
+          const parsed = parseInt(newInv[index].qty, 10);
+          newInv[index].qty = (isNaN(parsed) || parsed <= 0) ? 1 : parsed;
+          saveInventory(newInv);
+      };
+
+      const updateInventoryLocation = (index, newLocation) => {
+          let newInv = [...inventory];
+          newInv[index].location = newLocation;
+          saveInventory(newInv);
+      };
+
       const handleImportCSV = (e) => {
         const file = e.target.files[0];
         if (!file) return;
+        // 👑 修正：使用 header: false，因為「品號」重複會導致 key 被覆蓋
         Papa.parse(file, {
             header: false, skipEmptyLines: true,
             complete: function(res) {
-                const rows = res.data;
-                const headers = rows[0];
-                // 找出關鍵欄位的索引位置
-                const idx = {
-                    attr: headers.indexOf('屬性'),
-                    vendor: headers.indexOf('供應商'),
-                    material: headers.indexOf('物料'),
-                    id: headers.lastIndexOf('品號'), // 取最後一個品號
-                    name: headers.indexOf('品名'),
-                    price: headers.indexOf('售價'),
-                    box: headers.indexOf('箱入數'),
-                    cat: headers.indexOf('中分類')
-                };
+                const rawRows = res.data;
+                const headers = rawRows[0];
+                
+                // 找出關鍵欄位座標
+                const idxAttr = headers.indexOf('屬性');
+                const idxVendor = headers.indexOf('供應商');
+                const idxMaterial = headers.indexOf('物料');
+                const idxId = headers.lastIndexOf('品號'); // 抓最後一個
+                const idxName = headers.indexOf('品名');
+                const idxPrice = headers.indexOf('售價');
+                const idxBox = headers.indexOf('箱入數');
+                const idxCat = headers.indexOf('中分類');
 
-                const parsedMaster = rows.slice(1).map(row => ({
-                    id: String(row[idx.id] || '0'),
-                    name: String(row[idx.name] || '未知'),
-                    barcode: String(row[idx.material] || '').replace(/\s+/g, '').replace(/\.0$/, ''),
-                    // 額外資訊儲存，方便盤點時顯示
-                    vendor: row[idx.vendor],
-                    price: row[idx.price]
-                })).filter(i => i.barcode || i.id !== '0');
-
-                setMasterData(parsedMaster);
-                setRawMasterRows(rows); // 保存完整原始矩陣
-                localStorage.setItem('cup_master', JSON.stringify(parsedMaster));
-                localStorage.setItem('cup_raw_rows', JSON.stringify(rows));
-
-                if (db) {
-                    db.collection('inventory_settings').doc('master_data').set({ items: parsedMaster, rawRows: rows });
+                const parsed = [];
+                for(let i=1; i < rawRows.length; i++){
+                    const r = rawRows[i];
+                    parsed.push({
+                        attr: r[idxAttr] || '商品',
+                        vendor: r[idxVendor] || '',
+                        material: r[idxMaterial] || '',
+                        id: String(r[idxId] || '0'),
+                        name: r[idxName] || '未知',
+                        price: r[idxPrice] || '',
+                        boxQty: r[idxBox] || '',
+                        category: r[idxCat] || '',
+                        barcode: String(r[idxMaterial] || '').replace(/\s+/g, '').replace(/\.0$/, '')
+                    });
                 }
-                alert(`成功匯入 ${parsedMaster.length} 筆資料！格式座標已鎖定。`);
+                
+                const validData = parsed.filter(p => p.barcode || p.id !== '0');
+                setMasterData(validData);
+                if (db) {
+                    db.collection('inventory_settings').doc('master_data').set({ items: validData })
+                      .catch(err => console.error("雲端主檔更新失敗", err));
+                }
+                alert(`成功匯入 ${validData.length} 筆資料！所有欄位已鎖定座標讀取。`);
                 setShowAdmin(false);
             }
         });
       };
 
-      // 👑 修正：依據圖片二模板強制匯出
+      // 👑 修正：完全對應圖片二的 10 個欄位格式
       const handleExportERP = () => {
           if (inventory.length === 0) return alert("目前沒有盤點資料！");
           const qtyMap = {};
-          inventory.forEach(i => {
-              const key = i.id !== '0' && i.id !== 'NEW' ? i.id : i.barcode;
-              qtyMap[key] = (qtyMap[key] || 0) + (parseInt(i.qty, 10) || 0);
+          inventory.forEach(item => {
+              const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
+              qtyMap[key] = (qtyMap[key] || 0) + (parseInt(item.qty, 10) || 0);
           });
 
-          // 如果有原始矩陣，就用原始矩陣填入；否則用預設模板
-          let csvContent = "\ufeff屬性,供應商,物料,品號,品號,品名,售價,箱入數,中分類,門市庫存\n";
+          // 標頭定義 (對應圖片二)
+          const exportRows = [["屬性","供應商","物料","品號","品號","品名","售價","箱入數","中分類","門市庫存"]];
           
-          if (rawMasterRows.length > 1) {
-              const headers = rawMasterRows[0];
-              const idxId = headers.lastIndexOf('品號');
-              const idxMat = headers.indexOf('物料');
+          masterData.forEach(m => {
+              const key = m.id !== '0' ? m.id : m.barcode;
+              const totalQty = qtyMap[key] || 0;
+              exportRows.push([
+                  m.attr, m.vendor, m.material,
+                  parseInt(m.id, 10) || 0, // 第一個品號 (數字)
+                  m.id,                   // 第二個品號 (字串)
+                  m.name, m.price, m.boxQty, m.category,
+                  totalQty > 0 ? totalQty : '' // 最後一欄
+              ]);
+              qtyMap[key] = -1;
+          });
 
-              rawMasterRows.slice(1).forEach(row => {
-                  const key = String(row[idxId] || row[idxMat] || '');
-                  const totalQty = qtyMap[key] || 0;
-                  // 只取前 9 欄，並在第 10 欄補上數量
-                  const newRow = row.slice(0, 9);
-                  newRow[9] = totalQty > 0 ? totalQty : '';
-                  csvContent += newRow.map(v => `"${v}"`).join(",") + "\n";
-                  qtyMap[key] = -1;
-              });
-          } else {
-              // 預備方案
-              masterData.forEach(m => {
-                  const key = m.id !== '0' ? m.id : m.barcode;
-                  const totalQty = qtyMap[key] || 0;
-                  csvContent += `"商品","${m.vendor||''}","${m.barcode}","${parseInt(m.id)}","${m.id}","${m.name}","${m.price||''}","","","${totalQty>0?totalQty:''}"\n`;
-                  qtyMap[key] = -1;
-              });
-          }
-
-          // 補上不在主檔內的未知商品
-          inventory.forEach(i => {
-              const key = i.id !== '0' && i.id !== 'NEW' ? i.id : i.barcode;
-              if (qtyMap[key] !== -1) {
-                  csvContent += `"商品","","${i.barcode}","","${i.id !== 'NEW' ? i.id : ''}","${i.name}","","","","${i.qty}"\n`;
-                  qtyMap[key] = -1;
+          // 額外掃描到的
+          inventory.forEach(item => {
+              const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
+              if (qtyMap[key] !== -1 && qtyMap[key] > 0) {
+                  exportRows.push(["商品","",item.barcode,"",item.id !== 'NEW' ? item.id : '',item.name,"","","",qtyMap[key]]);
               }
           });
 
-          const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+          const csv = Papa.unparse(exportRows);
+          const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
-          a.download = `CUPICHO_盤點匯出_${new Date().toISOString().slice(0,10)}.csv`;
+          a.download = `CUPICHO_盤點匯出總表_${new Date().toISOString().slice(0,10)}.csv`;
+          a.click();
+      };
+
+      const handleExportDetails = () => {
+          let csv = "\ufeff場域,貨號,品名,條碼,數量,時間\n";
+          inventory.forEach(i => csv += `"${i.location}","${i.id}","${i.name}","${i.barcode}",${i.qty},"${i.time}"\n`);
+          const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = `Cupicho_區域明細_${new Date().toISOString().slice(0,10)}.csv`;
           a.click();
       };
 
@@ -304,20 +387,20 @@
         <div className="flex flex-col min-h-screen">
           <div id="flash-overlay" className="fixed inset-0 pointer-events-none z-[1100]"></div>
           <header className="p-4 flex justify-between items-center bg-slate-950 border-b border-slate-900 sticky top-0 z-[100]">
-              <div className="cursor-pointer" onClick={() => setShowSummary(false)}>
+              <div className="cursor-pointer" onClick={() => {setShowSummary(false); setShowAdmin(false);}}>
                   <h1 className="text-xl font-black text-yellow-500 italic leading-none">CUPICHO</h1>
-                  <p className="text-[9px] font-bold uppercase tracking-widest mt-1 text-slate-500">主檔: {masterData.length}</p>
+                  <p className="text-[9px] font-bold uppercase tracking-widest mt-1">
+                    <span className={db ? "text-emerald-500" : "text-slate-500"}>{db ? '☁️ 雲端連線中' : '📱 單機模式'}</span> | 主檔: {masterData.length}
+                  </p>
               </div>
               <button onClick={() => setShowAdmin(true)} className="bg-slate-900 text-slate-400 px-4 py-2 rounded-xl border border-slate-800 text-xs font-bold">⚙️ 管理</button>
           </header>
-
-          <section className="relative w-full min-h-[40vh] bg-black flex items-center justify-center border-b border-slate-900">
+          <section className="relative w-full min-h-[40vh] bg-black overflow-hidden flex items-center justify-center">
               <div id="reader" className="w-full h-full"></div>
               <div id="cam-gate" className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950">
-                  <button onClick={startScanner} className="bg-yellow-500 text-black px-12 py-5 rounded-2xl font-black text-xl shadow-lg active:scale-95">📷 啟動掃描</button>
+                  <button onClick={startScanner} className="bg-yellow-500 text-black px-12 py-5 rounded-2xl font-black text-xl shadow-lg active:scale-95 transition-all">📷 啟動掃描</button>
               </div>
           </section>
-
           <section className="p-4 -mt-10 relative z-30">
               <div className="glass-card rounded-[32px] p-6 shadow-2xl">
                   <div className="flex flex-col gap-2 mb-4">
@@ -327,22 +410,18 @@
                       <div className="text-[10px] text-emerald-500 font-bold px-2 h-4">{feedback}</div>
                   </div>
                   <div className="text-center mb-6 border-b border-slate-800 pb-4">
-                      <div className={`text-lg font-bold mb-1 ${currentItem ? 'text-white' : (scannedBarcode ? 'text-red-500' : 'text-slate-400')}`}>
-                          {currentItem ? currentItem.name : (scannedBarcode ? '⚠️ 尚未鎖定商品' : '等待掃描...')}
-                      </div>
-                      <div className="text-xs text-yellow-600 font-cinzel tracking-widest uppercase h-4">
-                          {currentItem ? `ID: ${currentItem.id}` : (scannedBarcode ? `IN: ${scannedBarcode}` : '')}
-                      </div>
+                      <div className="text-lg font-bold mb-1">{currentItem ? currentItem.name : (scannedBarcode ? '找不到商品' : '等待輸入...')}</div>
+                      <div className="text-xs text-yellow-600 font-cinzel tracking-widest uppercase">{currentItem ? `ID: ${currentItem.id}` : `SCAN: ${scannedBarcode}`}</div>
                   </div>
                   <div className="grid grid-cols-4 gap-3 relative">
                       <div className="col-span-3 relative">
-                          <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="w-full bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500 text-sm" placeholder="輸入條碼或品號" />
+                          <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="w-full bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500 placeholder-slate-600 text-sm" placeholder="輸入條碼、品號或品名" />
                           {nameSearchResults.length > 0 && (
                               <div className="absolute z-50 w-full bg-slate-800 border border-slate-600 mt-2 rounded-xl shadow-2xl max-h-[250px] overflow-y-auto">
                                   {nameSearchResults.map(item => (
-                                      <div key={item.id} onClick={() => selectSearchResult(item)} className="p-3 border-b border-slate-700/50 hover:bg-slate-700 cursor-pointer flex flex-col gap-1">
-                                          <span className="text-white text-xs font-bold">{item.name}</span>
-                                          <span className="text-yellow-500 text-[10px] font-cinzel">ID: {item.id}</span>
+                                      <div key={item.id} onClick={() => selectSearchResult(item)} className="p-3 border-b border-slate-700/50 last:border-0 hover:bg-slate-700 cursor-pointer">
+                                          <div className="text-white text-xs font-bold leading-snug">{item.name}</div>
+                                          <div className="text-yellow-500 text-[10px] font-cinzel">ID: {item.id} | BC: {item.barcode}</div>
                                       </div>
                                   ))}
                               </div>
@@ -353,75 +432,107 @@
                   </div>
               </div>
           </section>
-
           <section className="p-4 flex-1 pb-40">
               <div className="flex justify-between items-center mb-4 px-2">
-                  <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">歷史盤點清單</h2>
-                  <button onClick={() => setShowSummary(true)} className="text-xs font-bold text-yellow-500 bg-yellow-500/10 px-3 py-1 rounded-lg">📊 進度總覽</button>
+                  <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">區域歷史紀錄</h2>
+                  <button onClick={() => setShowSummary(true)} className="text-xs font-bold text-yellow-500">📊 進度總覽</button>
               </div>
               <div className="space-y-3">
                   {inventory.map((i, idx) => (
-                    <div key={idx} className="glass-card p-4 rounded-3xl flex justify-between items-center">
+                    <div key={idx} className="glass-card p-4 rounded-3xl flex justify-between items-center shadow-sm">
                         <div className="flex-1 pr-3">
-                            <span className="text-[10px] bg-yellow-500 text-black px-2 py-0.5 rounded font-bold">{i.location}</span>
-                            <div className="font-bold text-white text-sm mt-1">{i.name}</div>
-                            <div className="text-[10px] text-slate-500 font-cinzel mt-1">{i.barcode} • {i.time}</div>
+                            <div className="font-bold text-slate-100 text-sm mb-1">{i.name}</div>
+                            <div className="text-[10px] text-slate-500 font-cinzel uppercase">{i.barcode} • {i.location}</div>
                         </div>
                         <div className="flex items-center gap-2">
-                            <div className="flex items-center bg-slate-800 rounded-lg overflow-hidden">
-                                <button onClick={() => { let n = [...inventory]; n[idx].qty = Math.max(1, parseInt(n[idx].qty)-1); saveInventory(n); }} className="px-3 py-2 text-slate-300 font-bold">-</button>
-                                <input type="number" value={i.qty} onBlur={() => handleQtyBlur(idx)} onChange={e => { let n = [...inventory]; n[idx].qty = e.target.value; setInventory(n); }} className="text-lg font-cinzel font-black text-yellow-500 w-10 text-center bg-black py-2 outline-none" />
-                                <button onClick={() => { let n = [...inventory]; n[idx].qty = parseInt(n[idx].qty)+1; saveInventory(n); }} className="px-3 py-2 text-slate-300 font-bold">+</button>
+                            <div className="flex items-center bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
+                                <button onClick={() => updateInventoryQty(idx, -1)} className="px-3 py-2 text-slate-300 font-bold">-</button>
+                                <input type="number" value={i.qty} onChange={(e) => {
+                                    let newInv = [...inventory]; newInv[idx].qty = e.target.value; setInventory(newInv);
+                                }} onBlur={() => handleQtyBlur(idx)} className="text-lg font-cinzel font-black text-yellow-500 w-10 text-center bg-black py-2 outline-none" />
+                                <button onClick={() => updateInventoryQty(idx, 1)} className="px-3 py-2 text-slate-300 font-bold">+</button>
                             </div>
+                            <button onClick={() => { let newInv = [...inventory]; newInv.splice(idx, 1); saveInventory(newInv); }} className="text-slate-500 text-3xl ml-1">×</button>
                         </div>
                     </div>
                   ))}
               </div>
           </section>
-
           <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 w-[95%] max-w-sm z-[100]">
               <div className="bg-yellow-500 p-4 rounded-3xl flex justify-between items-center px-4 shadow-2xl border-4 border-slate-950">
-                  <div className="flex flex-col">
-                    <span className="text-black font-bold text-[8px] uppercase">Total</span>
+                  <div className="flex flex-col mr-2">
+                    <span className="text-black font-bold text-[8px] uppercase">Total Items</span>
                     <span className="text-2xl font-cinzel font-black text-black leading-none">{inventory.reduce((a, b) => a + (parseInt(b.qty)||0), 0)}</span>
                   </div>
                   <div className="flex gap-1">
                       <button onClick={handleDeleteCurrentSession} className="bg-red-600 text-white px-2 py-2 rounded-xl text-xs font-black">刪除</button>
+                      <button onClick={handleExportDetails} className="bg-slate-800 text-slate-300 px-2 py-2 rounded-xl text-xs font-black">明細</button>
                       <button onClick={handleExportERP} className="bg-black text-yellow-500 px-3 py-2 rounded-xl text-xs font-black whitespace-nowrap">匯出總表</button>
                   </div>
               </div>
           </div>
-
+          {showAdmin && (
+            <div className="modal-overlay">
+                <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-2xl font-bold text-white italic">⚙️ 系統管理</h3>
+                    <button onClick={() => setShowAdmin(false)} className="text-slate-500 text-4xl">×</button>
+                </div>
+                <div className="bg-emerald-900/20 border border-emerald-500/30 p-6 rounded-[32px] mb-6">
+                    <h4 className="text-emerald-500 font-bold mb-2">📥 重新上傳主檔 (V7.4 修復)</h4>
+                    <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-file" onChange={handleImportCSV} />
+                    <button onClick={() => document.getElementById('csv-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg">📁 選擇 CSV 檔案</button>
+                    <p className="text-[10px] text-slate-400 mt-3">⚠️ 系統現已透過欄位座標精確鎖定資料，解決了 CSV 中「品號」欄位名稱重複導致的 metadata 丟失問題。</p>
+                </div>
+                <button onClick={() => { if(confirm('⚠️ 確定重置核心快取？')){localStorage.clear();location.reload();} }} className="text-slate-600 text-xs font-bold py-4 mt-auto text-center w-full">重置核心快取</button>
+            </div>
+          )}
+          {showSummary && (
+            <div className="modal-overlay">
+                <div className="flex justify-between items-center mb-6">
+                    <h3 className="text-xl font-bold text-white italic">📊 進度總覽</h3>
+                    <button onClick={() => setShowSummary(false)} className="text-slate-500 text-4xl">×</button>
+                </div>
+                <div className="flex-1 overflow-y-auto space-y-4">
+                  {LOCATIONS.map(loc => {
+                    const items = inventory.filter(i => i.location === loc);
+                    const isDone = completedLocations.includes(loc);
+                    if (items.length === 0 && !isDone) return null;
+                    return (
+                      <div key={loc} className={`border rounded-[24px] overflow-hidden ${isDone ? 'bg-emerald-900/10 border-emerald-800' : 'bg-slate-900 border-slate-800'}`}>
+                          <div className={`px-5 py-3 flex justify-between items-center ${isDone ? 'bg-emerald-900/30' : 'bg-slate-800/80'}`}>
+                            <span className={`font-bold ${isDone ? 'text-emerald-400' : 'text-yellow-500'}`}>{isDone ? '✅ ' : ''}{loc}</span>
+                            <span className="text-[10px] text-slate-400 font-cinzel">Total {items.reduce((sum, item) => sum + (parseInt(item.qty)||0), 0)}</span>
+                          </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                <button onClick={() => setShowSummary(false)} className="mt-6 w-full bg-slate-800 text-white py-4 rounded-2xl font-bold shadow-lg">返回盤點</button>
+            </div>
+          )}
           {unknownBarcode && (
             <div className="modal-overlay">
-                <button onClick={() => setUnknownBarcode(null)} className="bg-red-600 text-white px-4 py-2 rounded-xl font-bold text-sm self-start mb-4">⬅ 返回</button>
-                <div className="bg-yellow-500/10 border border-yellow-500/30 p-4 rounded-2xl mb-6 text-center">
-                    <p className="text-[10px] text-yellow-500">掃描到未知條碼</p>
+                <div className="flex items-center justify-center mb-6 relative">
+                    <button onClick={() => setUnknownBarcode(null)} className="absolute left-0 top-0 bg-red-600 text-white px-4 py-2 rounded-xl font-bold text-sm">⬅ 返回</button>
+                    <h3 className="text-lg font-bold text-white mt-1.5">⚠️ 未知條碼</h3>
+                </div>
+                <div className="bg-yellow-500/10 p-4 rounded-2xl mb-6 text-center">
+                    <p className="text-[10px] text-yellow-500 mb-1">發現新條碼</p>
                     <p className="text-2xl font-cinzel font-bold text-white">{unknownBarcode}</p>
                 </div>
                 <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 mb-4">
-                  <h4 className="text-emerald-400 font-bold mb-3 text-sm">選項 A：新增全新商品</h4>
-                  <input type="text" value={newProductName} onChange={e=>setNewProductName(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="輸入商品名稱"/>
-                  <button onClick={() => { if(!newProductName) return; const nb = { ...manualBinds, [unknownBarcode]: { id: "NEW", name: newProductName } }; setManualBinds(nb); localStorage.setItem('cup_binds', JSON.stringify(nb)); setCurrentItem({ id: "NEW", name: newProductName }); setUnknownBarcode(null); }} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold">✅ 新增並鎖定</button>
+                  <h4 className="text-emerald-400 font-bold mb-3 text-sm">選項 A：新增商品</h4>
+                  <input type="text" value={newProductName} onChange={e=>setNewProductName(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="輸入名稱"/>
+                  <button onClick={() => {
+                    const newBinds = { ...manualBinds, [unknownBarcode]: { id: "NEW", name: newProductName } };
+                    saveBindsToCloud(newBinds); setCurrentItem({ id: "NEW", name: newProductName }); setUnknownBarcode(null);
+                  }} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold">✅ 確認</button>
                 </div>
-            </div>
-          )}
-
-          {showAdmin && (
-            <div className="modal-overlay">
-                <div className="flex justify-between items-center mb-6"><h3 className="text-2xl font-bold text-white italic">⚙️ 系統設定</h3><button onClick={() => setShowAdmin(false)} className="text-slate-500 text-4xl">×</button></div>
-                <div className="bg-emerald-900/20 border border-emerald-500/30 p-6 rounded-[32px] mb-6">
-                    <h4 className="text-emerald-500 font-bold mb-2">📥 匯入 ERP 商品主檔</h4>
-                    <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-file" onChange={handleImportCSV} />
-                    <button onClick={() => document.getElementById('csv-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold mt-2">📁 選擇檔案</button>
-                </div>
-                <button onClick={() => { localStorage.clear(); location.reload(); }} className="text-slate-600 text-xs font-bold py-4 mt-auto">重置系統</button>
             </div>
           )}
         </div>
       );
     }
-
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
   </script>
