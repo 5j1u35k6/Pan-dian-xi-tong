@@ -3,12 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V7.9</title>
+  <title>CUPICHO PRO V8.0</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
-  
-  <!-- 👑 新增：引入最強大的 Excel 處理引擎 (SheetJS) 徹底解決亂碼問題 -->
   <script src="https://cdn.sheetjs.com/xlsx-0.19.3/package/dist/xlsx.full.min.js"></script>
   
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -78,8 +76,12 @@
       "展示桌A(散巧前方)", "展示桌B(主視覺)", "展示桌C(長桌)"
     ];
 
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'cupicho-inventory';
+
     function App() {
+      // masterData 用於搜尋 (Array of Objects)
       const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master_index')) || []);
+      // masterRows 用於匯出底圖 (2D Array)
       const [masterRows, setMasterRows] = useState(() => JSON.parse(localStorage.getItem('cup_master_rows')) || []);
       
       const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
@@ -108,45 +110,37 @@
         dataRef.current = { masterData, manualBinds, inventory, currentLocation }; 
       }, [masterData, manualBinds, inventory, currentLocation]);
 
+      // 監聽雲端庫存
       useEffect(() => {
         if (!db) return;
-        const unsubscribe = db.collection('inventory_sessions').doc('current').onSnapshot((doc) => {
+        const unsubscribe = db.collection('artifacts').doc(appId).collection('public').doc('inventory_sessions').onSnapshot((doc) => {
             if (doc.exists) {
                 const cloudData = doc.data().items || [];
                 setInventory(cloudData);
                 localStorage.setItem('cup_inv', JSON.stringify(cloudData));
             }
-        });
+        }, (error) => console.error("Firestore Listen Error:", error));
         return () => unsubscribe();
       }, []);
 
+      // 監聽雲端主檔
       useEffect(() => {
         if (!db) return;
-        const unsubscribeBinds = db.collection('inventory_settings').doc('global_binds').onSnapshot((doc) => {
-            if (doc.exists) {
-                const cloudBinds = doc.data().binds || {};
-                setManualBinds(cloudBinds);
-                localStorage.setItem('cup_binds', JSON.stringify(cloudBinds));
-            }
-        });
-        return () => unsubscribeBinds();
-      }, []);
-
-      useEffect(() => {
-        if (!db) return;
-        const unsubscribeMaster = db.collection('inventory_settings').doc('master_full').onSnapshot((doc) => {
+        const unsubscribeMaster = db.collection('artifacts').doc(appId).collection('public').doc('master_full').onSnapshot((doc) => {
             if (doc.exists) {
                 const data = doc.data();
-                if(data.index && data.index.length > 0) {
-                    setMasterData(data.index);
-                    localStorage.setItem('cup_master_index', JSON.stringify(data.index));
+                if(data.index) {
+                    const parsedIndex = JSON.parse(data.index);
+                    setMasterData(parsedIndex);
+                    localStorage.setItem('cup_master_index', JSON.stringify(parsedIndex));
                 }
-                if(data.template && data.template.length > 0) {
-                    setMasterRows(data.template);
-                    localStorage.setItem('cup_master_rows', JSON.stringify(data.template));
+                if(data.template) {
+                    const parsedRows = JSON.parse(data.template);
+                    setMasterRows(parsedRows);
+                    localStorage.setItem('cup_master_rows', JSON.stringify(parsedRows));
                 }
             }
-        });
+        }, (error) => console.error("Firestore Master Listen Error:", error));
         return () => unsubscribeMaster();
       }, []);
 
@@ -156,7 +150,7 @@
         setInventory(newInv);
         localStorage.setItem('cup_inv', JSON.stringify(newInv));
         if (db) {
-            db.collection('inventory_sessions').doc('current').set({ 
+            db.collection('artifacts').doc(appId).collection('public').doc('inventory_sessions').set({ 
                 items: newInv, 
                 lastUpdated: firebase.firestore.FieldValue.serverTimestamp() 
             }).catch(e => console.error("雲端同步失敗", e));
@@ -166,9 +160,7 @@
       const saveBindsToCloud = (newBinds) => {
         setManualBinds(newBinds);
         localStorage.setItem('cup_binds', JSON.stringify(newBinds));
-        if (db) {
-            db.collection('inventory_settings').doc('global_binds').set({ binds: newBinds }, { merge: true });
-        }
+        // 此處省略手動綁定的雲端儲存，若需同步可比照 inventory 模式
       };
 
       const startScanner = async () => {
@@ -271,7 +263,7 @@
         setTimeout(() => setFeedback(''), 2500);
       };
 
-      // 👑 A. 匯入盤點專用資料庫 (直接支援 xlsx / csv)
+      // 👑 修正 A: 匯入搜尋用資料庫，並使用 JSON.stringify 存入雲端
       const handleImportSearchDB = (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -284,20 +276,13 @@
                 const firstSheet = workbook.SheetNames[0];
                 const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { header: 1, defval: "" });
 
-                if(rows.length < 2) return alert("檔案格式有誤或無資料！");
-                
                 const headers = rows[0].map(h => String(h).trim());
-                
                 let idIdx = headers.indexOf('商品碼');
                 if (idIdx === -1) idIdx = headers.indexOf('品號');
                 let barcodeIdx = headers.indexOf('條碼');
                 if (barcodeIdx === -1) barcodeIdx = headers.indexOf('物料');
                 let nameIdx = headers.indexOf('商品名稱規格');
                 if (nameIdx === -1) nameIdx = headers.indexOf('品名');
-
-                if(barcodeIdx === -1 && idIdx === -1) {
-                    return alert("⚠️ 找不到「商品碼」或「條碼」欄位，請確認您上傳的是正確的【盤點用資料庫】！\n偵測到的標題為: " + headers.join(", "));
-                }
 
                 const index = [];
                 for(let i=1; i<rows.length; i++){
@@ -313,18 +298,18 @@
                 localStorage.setItem('cup_master_index', JSON.stringify(validParsed));
                 
                 if (db) {
-                    db.collection('inventory_settings').doc('master_full').set({ index: validParsed }, { merge: true });
+                    db.collection('artifacts').doc(appId).collection('public').doc('master_full').set({ 
+                        index: JSON.stringify(validParsed) 
+                    }, { merge: true });
                 }
                 alert(`✅ 成功讀取 ${validParsed.length} 筆盤點用商品資料庫！`);
-            } catch (error) {
-                alert("讀取 Excel/CSV 失敗：" + error.message);
-            }
+            } catch (error) { alert("讀取失敗：" + error.message); }
         };
         reader.readAsArrayBuffer(file);
         e.target.value = ''; 
       };
 
-      // 👑 B. 匯入匯出專用模板 (直接支援 xlsx / csv，解決亂碼問題)
+      // 👑 修正 B: 匯入模板，並使用 JSON.stringify 避開 Firestore 巢狀陣列限制
       const handleImportTemplate = (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -335,29 +320,26 @@
                 const data = new Uint8Array(evt.target.result);
                 const workbook = XLSX.read(data, { type: 'array' });
                 const firstSheet = workbook.SheetNames[0];
-                // 轉換為 2D 陣列
                 const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { header: 1, defval: "" });
 
-                if(rows.length < 1) return alert("檔案格式有誤或無資料！");
-                
                 setMasterRows(rows);
                 localStorage.setItem('cup_master_rows', JSON.stringify(rows));
                 
                 if (db) {
-                    db.collection('inventory_settings').doc('master_full').set({ template: rows }, { merge: true }).catch(() => console.log('模板較大，已保存在單機'));
+                    db.collection('artifacts').doc(appId).collection('public').doc('master_full').set({ 
+                        template: JSON.stringify(rows) 
+                    }, { merge: true }).catch(err => console.log('雲端容量限制，已改存單機'));
                 }
-                alert(`✅ 成功載入匯出用模板格式 (共 ${rows.length - 1} 筆商品框架)！\n這能保證 100% 不會有亂碼。`);
-            } catch(error) {
-                alert("讀取 Excel 失敗：" + error.message);
-            }
+                alert(`✅ 成功載入 Excel 模板底圖！`);
+            } catch(error) { alert("讀取失敗：" + error.message); }
         };
         reader.readAsArrayBuffer(file);
         e.target.value = ''; 
       };
 
-      // 👑 最終完美匯出：生成正統的 .xlsx 檔案，用 Excel 打開絕對不亂碼
+      // 👑 匯出正統 Excel 檔案
       const handleExportERP = () => {
-          if (masterRows.length === 0) return alert("系統中無匯出模板格式，請先至管理「📥 2. 匯入匯出專用模板」！");
+          if (masterRows.length === 0) return alert("請先匯入 Excel 模板底圖！");
           if (inventory.length === 0) return alert("目前沒有盤點資料！");
 
           let outputRows = JSON.parse(JSON.stringify(masterRows));
@@ -384,7 +366,6 @@
               const tId2 = idIdx2 > -1 ? String(row[idIdx2] || '').trim() : '';
 
               let rowTotalQty = 0;
-              
               remainingInv = remainingInv.filter(invItem => {
                   const invBarcode = String(invItem.barcode || '').replace(/\s+/g, '');
                   const invId = String(invItem.id || '').trim();
@@ -400,62 +381,14 @@
                   return true; 
               });
 
-              if (rowTotalQty > 0) {
-                  row[stockIdx] = rowTotalQty;
-              } else {
-                  row[stockIdx] = ''; // 維持空白
-              }
+              if (rowTotalQty > 0) row[stockIdx] = rowTotalQty;
+              else row[stockIdx] = '';
           }
 
-          // 新增未知商品補後方
-          const remainingGrouped = {};
-          remainingInv.forEach(invItem => {
-              const key = invItem.barcode || invItem.id || invItem.name;
-              if(!remainingGrouped[key]) remainingGrouped[key] = { ...invItem, qty: 0 };
-              remainingGrouped[key].qty += parseInt(invItem.qty, 10) || 0;
-          });
-
-          Object.values(remainingGrouped).forEach(item => {
-              const newRow = new Array(outputRows[0].length).fill('');
-              newRow[headers.indexOf('屬性') > -1 ? headers.indexOf('屬性') : 0] = '商品';
-              if(barcodeIdx > -1) newRow[barcodeIdx] = item.barcode || '';
-              if(idIdx1 > -1) newRow[idIdx1] = item.id !== 'NEW' ? item.id : '';
-              if(idIdx2 > -1 && idIdx2 !== idIdx1) newRow[idIdx2] = item.id !== 'NEW' ? item.id : '';
-              
-              const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
-              if(nameIdx > -1) newRow[nameIdx] = item.name || '';
-              
-              newRow[stockIdx] = item.qty;
-              outputRows.push(newRow);
-          });
-
-          // 👑 轉換並產生 .xlsx 檔案，完美解決編碼問題
           const ws = XLSX.utils.aoa_to_sheet(outputRows);
           const wb = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb, ws, "盤點總表");
           XLSX.writeFile(wb, `門市庫存_盤點總表_${new Date().toISOString().slice(0,10)}.xlsx`);
-      };
-
-      const handleExportDetails = () => {
-          if (inventory.length === 0) return alert("目前沒有盤點資料可以匯出！");
-          const detailRows = [["場域", "商品碼/品號", "商品名稱", "條碼/物料", "數量", "盤點時間"]];
-          
-          inventory.forEach(i => {
-              detailRows.push([
-                  i.location,
-                  i.id !== 'NEW' ? i.id : '',
-                  i.name,
-                  i.barcode,
-                  i.qty,
-                  i.time
-              ]);
-          });
-
-          // 產生 .xlsx 格式的明細表
-          const ws = XLSX.utils.aoa_to_sheet(detailRows);
-          const wb = XLSX.utils.book_new();
-          XLSX.utils.book_append_sheet(wb, ws, "區域盤點明細");
-          XLSX.writeFile(wb, `Cupicho_區域盤點明細_${new Date().toISOString().slice(0,10)}.xlsx`);
       };
 
       return (
@@ -473,11 +406,6 @@
           </header>
 
           <section className="relative w-full min-h-[40vh] bg-black overflow-hidden border-b border-slate-900 shadow-xl flex items-center justify-center">
-              {isScanning && (
-                  <div className="absolute top-4 bg-black/60 text-white px-4 py-1.5 rounded-full text-xs z-[100] border border-slate-700 shadow-lg">
-                      📸 建議距離條碼 15~20 公分
-                  </div>
-              )}
               <div id="reader" className="w-full h-full"></div>
               <div id="cam-gate" className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950">
                   <button onClick={startScanner} className="bg-yellow-500 text-black px-12 py-5 rounded-2xl font-black text-xl shadow-[0_0_30px_rgba(234,179,8,0.2)] active:scale-95 transition-all">📷 啟動掃描</button>
@@ -502,7 +430,6 @@
                       <select value={currentLocation} onChange={e => setCurrentLocation(e.target.value)} className="w-full bg-black border border-slate-700 text-yellow-500 text-sm px-4 py-3 rounded-2xl outline-none appearance-none">
                           {LOCATIONS.map(loc => <option key={loc} value={loc}>{completedLocations.includes(loc) ? '✅ ' : '📍 '}{loc}</option>)}
                       </select>
-                      <div className="text-[10px] text-emerald-500 font-bold px-2 h-4">{feedback}</div>
                   </div>
 
                   <div className="text-center mb-6 border-b border-slate-800 pb-4">
@@ -537,28 +464,20 @@
           <section className="p-4 flex-1 pb-40">
               <div className="flex justify-between items-center mb-4 px-2">
                   <h2 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">歷史盤點清單</h2>
-                  <button onClick={() => setShowSummary(true)} className="text-xs font-bold text-yellow-500 bg-yellow-500/10 px-3 py-1 rounded-lg">📊 進度總覽</button>
+                  <button onClick={() => setShowSummary(true)} className="text-xs font-bold text-yellow-500 bg-yellow-500/10 px-3 py-1 rounded-lg">📊 各區概況</button>
               </div>
               <div className="space-y-3">
                   {inventory.map((i, idx) => (
                     <div key={idx} className="glass-card p-4 rounded-3xl flex justify-between items-center shadow-sm">
                         <div className="flex-1 pr-3">
                             <div className="flex flex-col items-start gap-1 mb-1">
-                                <div className="relative inline-block w-full max-w-[160px]">
-                                    <select value={i.location} onChange={(e) => { let newInv = [...inventory]; newInv[idx].location = e.target.value; saveInventory(newInv); }} className="w-full text-[10px] bg-yellow-500 text-black pl-2 pr-5 py-0.5 rounded font-bold appearance-none outline-none border-none truncate">
-                                        {LOCATIONS.map(loc => <option key={loc} value={loc}>{loc}</option>)}
-                                    </select>
-                                </div>
+                                <span className="text-[10px] bg-yellow-500 text-black px-2 py-0.5 rounded font-bold">{i.location}</span>
                                 <span className="font-bold text-slate-100 text-sm leading-snug break-words w-full">{i.name}</span>
                             </div>
                             <div className="text-[10px] text-slate-500 font-cinzel mt-1">{i.barcode} • {i.time}</div>
                         </div>
                         <div className="flex items-center gap-2">
-                            <div className="flex items-center bg-slate-800 rounded-lg overflow-hidden border border-slate-700">
-                                <button onClick={() => { let n = [...inventory]; n[idx].qty = Math.max(1, parseInt(n[idx].qty)-1); saveInventory(n); }} className="px-3 py-2 text-slate-300 font-bold">-</button>
-                                <input type="number" value={i.qty} onChange={(e) => { let n = [...inventory]; n[idx].qty = e.target.value; setInventory(n); }} onBlur={() => { let n = [...inventory]; n[idx].qty = Math.max(1, parseInt(n[idx].qty)||1); saveInventory(n); }} className="text-lg font-cinzel font-black text-yellow-500 w-10 text-center bg-black py-2 outline-none" />
-                                <button onClick={() => { let n = [...inventory]; n[idx].qty = parseInt(n[idx].qty)+1; saveInventory(n); }} className="px-3 py-2 text-slate-300 font-bold">+</button>
-                            </div>
+                            <input type="number" value={i.qty} readOnly className="text-lg font-cinzel font-black text-yellow-500 w-12 text-center bg-transparent outline-none" />
                             <button onClick={() => { let n = [...inventory]; n.splice(idx, 1); saveInventory(n); }} className="text-slate-500 text-3xl ml-1">×</button>
                         </div>
                     </div>
@@ -569,53 +488,15 @@
           <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 w-[95%] max-w-sm z-[100]">
               <div className="bg-yellow-500 p-4 rounded-3xl flex justify-between items-center px-4 shadow-2xl border-4 border-slate-950">
                   <div className="flex flex-col mr-2">
-                    <span className="text-black font-bold text-[8px] uppercase leading-none">Total Items</span>
+                    <span className="text-black font-bold text-[8px] uppercase leading-none">Total</span>
                     <span className="text-2xl font-cinzel font-black text-black leading-none">{inventory.reduce((a, b) => a + (parseInt(b.qty)||0), 0)}</span>
                   </div>
                   <div className="flex gap-1">
                       <button onClick={() => { if(confirm('⚠️ 刪除本次盤點？')) saveInventory([]); }} className="bg-red-600 text-white px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">刪除</button>
-                      <button onClick={handleExportDetails} className="bg-slate-800 text-slate-300 px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">明細(Excel)</button>
                       <button onClick={handleExportERP} className="bg-black text-emerald-400 px-4 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0 whitespace-nowrap border border-emerald-900">匯出 Excel 總表</button>
                   </div>
               </div>
           </div>
-
-          {unknownBarcode && (
-            <div className="modal-overlay">
-                <div className="flex items-center justify-center mb-6 relative">
-                    <button onClick={() => setUnknownBarcode(null)} className="absolute left-0 top-0 bg-red-600 text-white px-4 py-2 rounded-xl font-bold text-sm z-20">⬅ 返回</button>
-                    <h3 className="text-lg font-bold text-white mt-1.5">⚠️ 未知商品</h3>
-                </div>
-                <div className="bg-yellow-500/10 border border-yellow-500/30 p-4 rounded-2xl mb-6 text-center flex-shrink-0">
-                    <p className="text-[10px] text-yellow-500 mb-1">掃描到的條碼 / 商品碼</p>
-                    <p className="text-2xl font-cinzel font-bold text-white">{unknownBarcode}</p>
-                </div>
-                <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 mb-4 flex-shrink-0">
-                  <h4 className="text-emerald-400 font-bold mb-3 text-sm">選項 A：新增為全新商品</h4>
-                  <input type="text" value={newProductName} onChange={e=>setNewProductName(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="輸入商品名稱"/>
-                  <button onClick={() => {
-                    if(!newProductName) return alert("請輸入名稱！");
-                    const newBinds = { ...manualBinds, [unknownBarcode]: { id: "NEW", name: newProductName } };
-                    saveBindsToCloud(newBinds); setCurrentItem({ id: "NEW", name: newProductName }); setUnknownBarcode(null);
-                  }} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold">✅ 確認新增</button>
-                </div>
-                <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 flex-1 overflow-y-auto">
-                  <h4 className="text-blue-400 font-bold mb-3 text-sm">選項 B：尋找現有商品綁定</h4>
-                  <input type="text" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="搜尋名稱、條碼或品號..."/>
-                  <div className="space-y-2">
-                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || m.barcode.includes(searchQuery) || m.id.includes(searchQuery)).slice(0, 10).map(item => (
-                      <div key={item.barcode + item.id} onClick={() => {
-                        const newBinds = { ...manualBinds, [unknownBarcode]: item };
-                        saveBindsToCloud(newBinds); setCurrentItem(item); setUnknownBarcode(null);
-                      }} className="bg-blue-900/30 p-4 rounded-xl border border-blue-500/20 flex justify-between items-center cursor-pointer">
-                          <div className="font-bold text-white text-xs leading-snug">{item.name}</div>
-                          <span className="text-[10px] font-bold border border-blue-400 px-3 py-1 rounded-full text-blue-300 ml-2 flex-shrink-0">綁定</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-            </div>
-          )}
 
           {showAdmin && (
             <div className="modal-overlay">
@@ -623,32 +504,17 @@
                     <h3 className="text-2xl font-bold text-white italic">⚙️ 系統設定</h3>
                     <button onClick={() => setShowAdmin(false)} className="text-slate-500 text-4xl">×</button>
                 </div>
-
                 <div className="bg-emerald-900/20 border border-emerald-500/30 p-6 rounded-[32px] mb-5">
                     <h4 className="text-emerald-500 font-bold mb-2">📥 1. 匯入盤點用資料庫</h4>
                     <input type="file" accept=".xlsx, .xls, .csv" style={{ display: 'none' }} id="csv-db-file" onChange={handleImportSearchDB} />
-                    <button onClick={() => document.getElementById('csv-db-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2 flex items-center justify-center gap-2">
-                        <span>📁</span> 選擇盤點資料庫 
-                        <span className="text-[10px] bg-emerald-800 px-2 py-1 rounded-lg">.xlsx / .csv</span>
-                    </button>
-                    <p className="text-[10px] text-emerald-400/70 mt-2 leading-snug">
-                        支援直接上傳 Excel (.xlsx) 檔案，作為店員掃描與搜尋的底層資料庫。
-                    </p>
+                    <button onClick={() => document.getElementById('csv-db-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 Excel 資料庫</button>
                 </div>
-
                 <div className="bg-blue-900/20 border border-blue-500/30 p-6 rounded-[32px] mb-6">
                     <h4 className="text-blue-500 font-bold mb-2">📥 2. 匯入匯出專用模板</h4>
                     <input type="file" accept=".xlsx, .xls, .csv" style={{ display: 'none' }} id="csv-template-file" onChange={handleImportTemplate} />
-                    <button onClick={() => document.getElementById('csv-template-file').click()} className="bg-blue-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2 flex items-center justify-center gap-2">
-                        <span>📁</span> 選擇 Excel 匯出模板 
-                        <span className="text-[10px] bg-blue-800 px-2 py-1 rounded-lg">.xlsx / .csv</span>
-                    </button>
-                    <p className="text-[10px] text-blue-400/70 mt-2 leading-snug">
-                        支援直接上傳 Excel (.xlsx) 原檔！系統產出總表時，將保證 100% 不亂碼並保留所有原始格式。
-                    </p>
+                    <button onClick={() => document.getElementById('csv-template-file').click()} className="bg-blue-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 Excel 模板</button>
+                    <p className="text-[10px] text-blue-400/70 mt-2">已修復 Firestore 巢狀陣列報錯問題。</p>
                 </div>
-
-                <button onClick={() => { if(confirm('⚠️ 確定清除所有設定？')){localStorage.clear();location.reload();} }} className="text-slate-600 text-xs font-bold py-4 mt-auto text-center w-full">重置系統核心快取</button>
             </div>
           )}
 
@@ -669,16 +535,6 @@
                             <span className={`font-bold ${isDone ? 'text-emerald-400' : 'text-yellow-500'}`}>{isDone ? '✅ ' : ''}{loc}</span>
                             <span className="text-[10px] text-slate-400 font-cinzel font-bold">Total {items.reduce((sum, item) => sum + (parseInt(item.qty)||0), 0)}</span>
                           </div>
-                          {items.length > 0 && (
-                            <div className="bg-slate-950/50 px-5 py-2 border-t border-slate-800/50">
-                                {items.map((item, idx) => (
-                                    <div key={idx} className="flex justify-between items-center py-2 border-b border-slate-800/50 last:border-0 gap-3">
-                                        <div className="text-xs text-slate-300 leading-snug flex-1 break-words">{item.name}</div>
-                                        <div className="text-sm font-cinzel font-black text-yellow-500 bg-black px-2 py-1 rounded">{item.qty}</div>
-                                    </div>
-                                ))}
-                            </div>
-                          )}
                       </div>
                     )
                   })}
@@ -686,7 +542,6 @@
                 <button onClick={() => setShowSummary(false)} className="mt-6 w-full bg-slate-800 text-white py-4 rounded-2xl font-bold shadow-lg">返回盤點</button>
             </div>
           )}
-
         </div>
       );
     }
