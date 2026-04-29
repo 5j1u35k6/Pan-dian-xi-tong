@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V7.4</title>
+  <title>CUPICHO PRO V7.5</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
   
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></button>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
   
   <script src="https://www.gstatic.com/firebasejs/10.8.1/firebase-app-compat.js"></script>
@@ -77,9 +77,7 @@
     ];
 
     function App() {
-      // 👑 masterRows 儲存整份 CSV 的二維陣列 (含所有欄位)
       const [masterRows, setMasterRows] = useState(() => JSON.parse(localStorage.getItem('cup_master_rows')) || []);
-      // 👑 masterData 則是為了搜尋效能建立的索引清單
       const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master_index')) || []);
       
       const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
@@ -132,7 +130,6 @@
         return () => unsubscribeBinds();
       }, []);
 
-      // 同步主檔資料與索引
       useEffect(() => {
         if (!db) return;
         const unsubscribeMaster = db.collection('inventory_settings').doc('master_full').onSnapshot((doc) => {
@@ -270,20 +267,28 @@
             header: false, skipEmptyLines: true,
             complete: function(res) {
                 const rows = res.data;
-                const headers = rows[0];
-                const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('品號');
-                const nameIdx = headers.indexOf('品名');
-                const barcodeIdx = headers.indexOf('物料');
+                if(rows.length < 2) return alert("檔案格式有誤或無資料！");
+                const headers = rows[0].map(h => h ? h.trim() : ''); // 去除 BOM 與多餘空白
+                
+                const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
+                const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
+                const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
 
-                // 建立索引
+                if (idIdx === -1 && barcodeIdx === -1) {
+                    return alert("⚠️ 讀取失敗，找不到「品號」或「物料」欄位，請確認上傳的檔案格式是否正確。");
+                }
+
                 const index = [];
                 for(let i=1; i<rows.length; i++){
                     index.push({
-                        id: String(rows[i][idIdx] || '0'),
-                        name: String(rows[i][nameIdx] || '未知'),
-                        barcode: String(rows[i][barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '')
+                        id: idIdx > -1 ? String(rows[i][idIdx] || '0') : '0',
+                        name: nameIdx > -1 ? String(rows[i][nameIdx] || '未知') : '未知',
+                        barcode: barcodeIdx > -1 ? String(rows[i][barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '') : ''
                     });
                 }
+                
+                // 儲存乾淨的 headers 和資料列
+                rows[0] = headers;
                 
                 setMasterRows(rows);
                 setMasterData(index);
@@ -297,9 +302,8 @@
         });
       };
 
-      // 👑 升級後的匯出邏輯：以原始二維陣列為基底，填入數量
       const handleExportERP = () => {
-          if (masterRows.length === 0) return alert("請先匯入商品主檔 CSV！");
+          if (masterRows.length === 0) return alert("請先前往管理頁面匯入商品主檔 CSV！");
           if (inventory.length === 0) return alert("目前沒有盤點資料！");
           
           const qtyMap = {};
@@ -312,21 +316,28 @@
           let outputRows = JSON.parse(JSON.stringify(masterRows));
           const headers = outputRows[0];
           
-          // 找尋關鍵欄位索引
-          const stockIdx = headers.indexOf('門市庫存');
+          let stockIdx = headers.indexOf('門市庫存');
+          if (stockIdx === -1) {
+              headers.push('門市庫存');
+              stockIdx = headers.length - 1;
+          }
+          
           const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('品號');
-          const barcodeIdx = headers.indexOf('物料');
+          const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
 
-          // 填入數量
           for(let i=1; i<outputRows.length; i++){
               const row = outputRows[i];
-              const key = row[idIdx] !== '0' ? String(row[idIdx]) : String(row[barcodeIdx]);
+              while(row.length < headers.length) row.push(''); // 防呆對齊欄位
               
-              if(qtyMap[key]) {
+              const rowId = idIdx > -1 ? String(row[idIdx]) : '0';
+              const rowBc = barcodeIdx > -1 ? String(row[barcodeIdx]) : '';
+              const key = rowId !== '0' && rowId !== '' && rowId !== 'undefined' ? rowId : rowBc;
+              
+              if(qtyMap[key] !== undefined && qtyMap[key] !== -1 && qtyMap[key] > 0) {
                   row[stockIdx] = qtyMap[key];
-                  qtyMap[key] = -1; // 標記已填入
+                  qtyMap[key] = -1; 
               } else {
-                  row[stockIdx] = ''; // 沒盤到就維持空白
+                  row[stockIdx] = ''; 
               }
           }
 
@@ -335,12 +346,18 @@
               const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
               if (qtyMap[key] > 0) {
                   const newRow = new Array(headers.length).fill('');
-                  newRow[headers.indexOf('屬性')] = '商品';
-                  newRow[barcodeIdx] = item.barcode;
-                  newRow[idIdx] = item.id !== 'NEW' ? item.id : '';
-                  newRow[headers.indexOf('品名')] = item.name;
+                  const attrIdx = headers.indexOf('屬性');
+                  if (attrIdx > -1) newRow[attrIdx] = '商品';
+                  
+                  if (barcodeIdx > -1) newRow[barcodeIdx] = item.barcode;
+                  if (idIdx > -1) newRow[idIdx] = item.id !== 'NEW' ? item.id : '';
+                  
+                  const nameIdx = headers.indexOf('品名');
+                  if (nameIdx > -1) newRow[nameIdx] = item.name;
+                  
                   newRow[stockIdx] = qtyMap[key];
                   outputRows.push(newRow);
+                  qtyMap[key] = -1;
               }
           });
 
@@ -348,7 +365,7 @@
           const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
-          a.download = `CUPICHO_盤點總表_${new Date().toISOString().slice(0,10)}.csv`;
+          a.download = `CUPICHO_門市庫存總表_${new Date().toISOString().slice(0,10)}.csv`;
           a.click();
       };
 
@@ -479,7 +496,7 @@
                     <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-file" onChange={handleImportCSV} />
                     <button onClick={() => document.getElementById('csv-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 CSV 檔案</button>
                     <p className="text-[10px] text-slate-400 mt-3 leading-snug italic">
-                        💡 請確保 CSV 第一列標題包含：物料、品號、品名、門市庫存、供應商、售價、中分類。
+                        💡 請您務必重新匯入一次最新的商品 CSV 主檔，系統會完整記憶您的檔案格式（包含供應商、售價等所有屬性）。
                     </p>
                 </div>
                 <button onClick={() => { if(confirm('⚠️ 確定清除所有設定？')){localStorage.clear();location.reload();} }} className="text-slate-600 text-xs font-bold py-4 mt-auto text-center w-full">重置系統核心快取</button>
