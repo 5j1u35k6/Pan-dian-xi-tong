@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V6.7</title>
+  <title>CUPICHO PRO V6.8</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -20,7 +20,6 @@
     body { background-color: #020617; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent;}
     .glass-card { background: rgba(15, 23, 42, 0.8); border: 1px solid rgba(51, 65, 85, 0.5); backdrop-filter: blur(12px); }
     
-    /* 👑 修正核心：將 z-index 提高到 2000，並增加底部安全留白，避免被任何固定區塊遮擋 */
     .modal-overlay { 
         position: fixed; inset: 0; 
         background: rgba(2, 6, 23, 0.95); backdrop-filter: blur(15px); 
@@ -83,6 +82,7 @@
       
       const [currentLocation, setCurrentLocation] = useState(LOCATIONS[0]);      
       const [scannedBarcode, setScannedBarcode] = useState('');
+      const [nameSearchResults, setNameSearchResults] = useState([]); // 新增：搜尋結果狀態
       const [currentItem, setCurrentItem] = useState(null); 
       const [qty, setQty] = useState('');
       const [feedback, setFeedback] = useState('');
@@ -102,6 +102,7 @@
         dataRef.current = { masterData, manualBinds, inventory, currentLocation }; 
       }, [masterData, manualBinds, inventory, currentLocation]);
 
+      // 🌐 雲端同步：盤點資料
       useEffect(() => {
         if (!db) return;
         const unsubscribe = db.collection('inventory_sessions').doc('current').onSnapshot((doc) => {
@@ -114,6 +115,7 @@
         return () => unsubscribe();
       }, []);
 
+      // 🌐 雲端同步：未知商品綁定紀錄
       useEffect(() => {
         if (!db) return;
         const unsubscribeBinds = db.collection('inventory_settings').doc('global_binds').onSnapshot((doc) => {
@@ -124,6 +126,19 @@
             }
         });
         return () => unsubscribeBinds();
+      }, []);
+
+      // 🌐 雲端同步：商品主檔 (解決A上傳，B看不見的問題)
+      useEffect(() => {
+        if (!db) return;
+        const unsubscribeMaster = db.collection('inventory_settings').doc('master_data').onSnapshot((doc) => {
+            if (doc.exists) {
+                const cloudMaster = doc.data().items || [];
+                setMasterData(cloudMaster);
+                localStorage.setItem('cup_master', JSON.stringify(cloudMaster));
+            }
+        });
+        return () => unsubscribeMaster();
       }, []);
 
       useEffect(() => { localStorage.setItem('cup_master', JSON.stringify(masterData)); }, [masterData]);
@@ -153,6 +168,7 @@
         const gate = document.getElementById('cam-gate');
         if (gate) gate.style.display = 'none';
         setIsScanning(true);
+        setNameSearchResults([]);
 
         if (!scannerRef.current) scannerRef.current = new Html5Qrcode("reader");
 
@@ -210,15 +226,40 @@
         }
       };
 
-      const handleManualInput = (code) => {
-          setScannedBarcode(code);
-          const found = masterData.find(m => String(m.barcode) === code) || manualBinds[code];
-          setCurrentItem(found || null);
+      // 修改：支援名稱搜尋
+      const handleManualInput = (text) => {
+          setScannedBarcode(text);
+          const exactMatch = masterData.find(m => String(m.barcode) === text) || manualBinds[text];
+          
+          if (exactMatch) {
+              setCurrentItem(exactMatch);
+              setNameSearchResults([]); // 完全符合條碼，隱藏搜尋清單
+          } else {
+              setCurrentItem(null);
+              // 如果輸入超過1個字且不是條碼全對，就啟動名稱搜尋
+              if (text.length > 0) {
+                  const results = masterData.filter(m => m.name.toLowerCase().includes(text.toLowerCase()) || m.barcode.includes(text)).slice(0, 15);
+                  setNameSearchResults(results);
+              } else {
+                  setNameSearchResults([]);
+              }
+          }
+      };
+
+      // 新增：從搜尋清單中選擇商品
+      const selectSearchResult = (item) => {
+          setScannedBarcode(item.barcode);
+          setCurrentItem(item);
+          setNameSearchResults([]);
       };
 
       const handleAddRecord = () => {
+        if (nameSearchResults.length > 0 && !currentItem) {
+            return alert("請從下拉清單中選擇正確的商品！");
+        }
+        
         const parsedQty = parseInt(qty, 10);
-        if (!scannedBarcode) return alert("請先掃描或輸入條碼！");
+        if (!scannedBarcode) return alert("請先掃描或輸入條碼/商品名稱！");
         if (isNaN(parsedQty) || parsedQty <= 0) return alert("請輸入有效的數量！(不能為空白或0)");
         
         const item = currentItem || { id: "NEW", name: "未知商品" };
@@ -291,6 +332,7 @@
         }
       };
 
+      // 修改：上傳CSV時同步到雲端
       const handleImportCSV = (e) => {
         const file = e.target.files[0];
         if (!file) return;
@@ -302,8 +344,15 @@
                     name: String(i['商品名稱規格'] || '未知'),
                     barcode: String(i['條碼'] || '').replace(/\s+/g, '').replace(/\.0$/, '')
                 })).filter(i => i.barcode);
+                
                 setMasterData(parsed);
-                alert(`成功匯入 ${parsed.length} 筆最新商品資料！`);
+                
+                if (db) {
+                    db.collection('inventory_settings').doc('master_data').set({ items: parsed })
+                      .catch(err => alert("⚠️ 主檔上傳雲端失敗（檔案可能過大），但本機已更新。"));
+                }
+                
+                alert(`成功匯入 ${parsed.length} 筆最新商品資料，並已同步至雲端！`);
                 setShowAdmin(false);
             }
         });
@@ -333,7 +382,7 @@
               <div className="cursor-pointer" onClick={() => {setShowSummary(false); setShowAdmin(false);}}>
                   <h1 className="text-xl font-black text-yellow-500 italic leading-none">CUPICHO</h1>
                   <p className="text-[9px] font-bold uppercase tracking-widest mt-1">
-                    <span className={db ? "text-emerald-500" : "text-slate-500"}>{db ? '☁️ 雲端同步中' : '📱 單機模式'}</span> | 主檔: {masterData.length}
+                    <span className={db ? "text-emerald-500" : "text-slate-500"}>{db ? '☁️ 雲端已連線' : '📱 單機模式'}</span> | 主檔: {masterData.length}
                   </p>
               </div>
               <button onClick={() => setShowAdmin(true)} className="bg-slate-900 text-slate-400 px-4 py-2 rounded-xl border border-slate-800 text-xs font-bold">⚙️ 管理</button>
@@ -370,17 +419,33 @@
 
                   <div className="text-center mb-6 border-b border-slate-800 pb-4">
                       <div className={`text-lg font-bold mb-1 ${currentItem ? 'text-white' : (scannedBarcode ? 'text-red-500' : 'text-slate-400')}`}>
-                          {currentItem ? currentItem.name : (scannedBarcode ? '⚠️ 掃描完成' : '等待掃描...')}
+                          {currentItem ? currentItem.name : (scannedBarcode ? '⚠️ 尚未鎖定商品' : '等待掃描...')}
                       </div>
-                      <div className="text-xs text-yellow-600 font-mono tracking-widest uppercase">
-                          {scannedBarcode ? `BC: ${scannedBarcode}` : 'BC: ---'}
+                      <div className="text-xs text-yellow-600 font-mono tracking-widest uppercase h-4">
+                          {currentItem && currentItem.barcode ? `BC: ${currentItem.barcode}` : (scannedBarcode && !nameSearchResults.length ? `輸入: ${scannedBarcode}` : '')}
                       </div>
                   </div>
 
-                  <div className="grid grid-cols-4 gap-3">
-                      <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="col-span-3 bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500" placeholder="手動輸入條碼" />
+                  <div className="grid grid-cols-4 gap-3 relative">
+                      <div className="col-span-3 relative">
+                          <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="w-full bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500 placeholder-slate-600 text-sm" placeholder="輸入條碼或品名搜尋" />
+                          
+                          {/* 智慧搜尋下拉選單 */}
+                          {nameSearchResults.length > 0 && (
+                              <div className="absolute z-50 w-full bg-slate-800 border border-slate-600 mt-2 rounded-xl shadow-2xl max-h-[250px] overflow-y-auto">
+                                  {nameSearchResults.map(item => (
+                                      <div key={item.id} onClick={() => selectSearchResult(item)} className="p-3 border-b border-slate-700/50 last:border-0 hover:bg-slate-700 cursor-pointer flex flex-col gap-1">
+                                          <span className="text-white text-xs font-bold leading-snug">{item.name}</span>
+                                          <span className="text-yellow-500 text-[10px] font-mono">{item.barcode}</span>
+                                      </div>
+                                  ))}
+                              </div>
+                          )}
+                      </div>
+                      
                       <input type="number" value={qty} onChange={e => setQty(e.target.value)} className="col-span-1 bg-black border border-slate-700 rounded-2xl p-4 text-2xl font-black text-center text-yellow-500 outline-none focus:border-yellow-500 placeholder-slate-700" placeholder="數量" />
-                      <button onClick={handleAddRecord} className="col-span-4 bg-gradient-to-br from-yellow-400 to-yellow-600 text-black py-5 rounded-2xl active:scale-95 text-xl font-bold shadow-lg">確認送出</button>
+                      
+                      <button onClick={handleAddRecord} className="col-span-4 bg-gradient-to-br from-yellow-400 to-yellow-600 text-black py-5 rounded-2xl active:scale-95 text-xl font-bold shadow-lg mt-2">確認送出</button>
                   </div>
               </div>
           </section>
