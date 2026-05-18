@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V8.4</title>
+  <title>CUPICHO PRO V8.5</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -42,7 +42,7 @@
     input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     
     #reader { width: 100%; display: flex; justify-content: center; overflow: hidden; position: relative; }
-    #reader video { width: 100% !important; object-fit: cover !important; transform: scale(1.3); }
+    #reader video { width: 100% !important; object-fit: cover !important; transform: scale(1.2); }
   </style>
 </head>
 <body>
@@ -51,37 +51,17 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
-    // 👑 1. 安全解析快取機制 (防範空白畫面)
-    const safeJSONParse = (key, defaultVal) => {
+    // 🛡️ 防白畫面機制：安全讀取快取，避免損壞的資料讓網頁崩潰
+    const safeGetItem = (key, defaultVal) => {
         try {
-            const val = localStorage.getItem(key);
-            if (!val || val === "undefined" || val === "null") return defaultVal;
-            return JSON.parse(val);
-        } catch(e) {
-            console.error("Cache Parse Error:", e);
+            const item = localStorage.getItem(key);
+            if (!item || item === "undefined" || item === "null") return defaultVal;
+            return JSON.parse(item);
+        } catch (error) {
+            console.warn("快取讀取異常，已重置該欄位:", key);
             return defaultVal;
         }
     };
-
-    // 👑 2. 系統防護罩 (遇到致命錯誤時顯示重置畫面，取代空白)
-    class ErrorBoundary extends React.Component {
-        constructor(props) { super(props); this.state = { hasError: false, errorMsg: "" }; }
-        static getDerivedStateFromError(error) { return { hasError: true, errorMsg: error.toString() }; }
-        render() {
-            if (this.state.hasError) {
-                return (
-                    <div className="p-8 text-white flex flex-col items-center justify-center min-h-screen text-center bg-slate-950">
-                        <h2 className="text-3xl font-black text-red-500 mb-4 italic">⚠️ 系統遭遇衝突</h2>
-                        <p className="bg-red-900/30 text-red-300 p-4 rounded-xl mb-8 text-xs">{this.state.errorMsg}</p>
-                        <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="bg-yellow-500 text-black px-8 py-4 rounded-2xl font-bold shadow-[0_0_20px_rgba(234,179,8,0.3)] active:scale-95 transition-all">
-                            🧹 清除快取並重啟系統
-                        </button>
-                    </div>
-                );
-            }
-            return this.props.children;
-        }
-    }
 
     const firebaseConfig = {
       apiKey: "AIzaSyA7636rgPhQNCM8V9mgG6uCxKTxpBU7v70",
@@ -111,12 +91,12 @@
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'cupicho-inventory';
 
     function App() {
-      // 載入資料時全數透過安全函數處理
-      const [masterData, setMasterData] = useState(() => safeJSONParse('cup_master_index', []));
-      const [masterRows, setMasterRows] = useState(() => safeJSONParse('cup_master_rows', []));
-      const [inventory, setInventory] = useState(() => safeJSONParse('cup_inv', []));
-      const [manualBinds, setManualBinds] = useState(() => safeJSONParse('cup_binds', {}));
-      const [completedLocations, setCompletedLocations] = useState(() => safeJSONParse('cup_completed_locs', []));
+      // 💯 完全還原 8.2 的介面狀態，並加上防護盾
+      const [masterData, setMasterData] = useState(() => safeGetItem('cup_master_index', []));
+      const [masterRows, setMasterRows] = useState(() => safeGetItem('cup_master_rows', []));
+      const [inventory, setInventory] = useState(() => safeGetItem('cup_inv', []));
+      const [manualBinds, setManualBinds] = useState(() => safeGetItem('cup_binds', {}));
+      const [completedLocations, setCompletedLocations] = useState(() => safeGetItem('cup_completed_locs', []));
       
       const [currentLocation, setCurrentLocation] = useState(LOCATIONS[0]);      
       const [scannedBarcode, setScannedBarcode] = useState('');
@@ -199,16 +179,21 @@
 
         try {
           await scannerRef.current.start(
-            // 使用最安全的預設相機調用，避免硬體不支援當機
             { facingMode: "environment" },
             { 
-              fps: 15, // 高幀率擷取
-              // 👑 將掃描區壓扁成 120px，強迫集中運算力在細長條碼上
-              qrbox: (viewfinderWidth, viewfinderHeight) => ({ width: Math.floor(viewfinderWidth * 0.8), height: 120 }),
-              experimentalFeatures: {
-                  useBarCodeDetectorIfSupported: true // 使用硬體 AI 加速
-              }
-              // ⚠️ 關鍵修正：移除了 formatsToSupport，系統將自動開啟「暴力全格式解碼模式」，不再漏掉特規條碼
+              fps: 15, // 提高偵測頻率
+              // 🚀 隱藏升級：壓扁掃描框高度至150，逼迫相機運算力集中於細長的化妝品條碼
+              qrbox: (viewfinderWidth, viewfinderHeight) => ({ width: Math.floor(viewfinderWidth * 0.85), height: 150 }),
+              // 🚀 隱藏升級：啟動手機硬體 AI 加速辨識引擎
+              experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+              formatsToSupport: [
+                  Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.CODE_128,
+                  Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+                  // 🚀 隱藏升級：加入歐美特規 UPC 格式，防止漏網之魚
+                  Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
+                  Html5QrcodeSupportedFormats.QR_CODE
+              ],
+              videoConstraints: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } 
             },
             (decodedText) => { 
               const f = document.getElementById('flash-overlay'); 
@@ -235,7 +220,7 @@
             }
           );
         } catch (err) { 
-            alert("相機啟動失敗，請確認已授權相機權限：" + err);
+            alert("相機啟動失敗：" + err);
             setIsScanning(false);
             if (gate) gate.style.display = 'flex';
         }
@@ -347,11 +332,13 @@
                 const firstSheet = workbook.SheetNames[0];
                 const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { header: 1, defval: "" });
 
+                // 1. 記憶為匯出底圖
                 setMasterRows(rows);
                 localStorage.setItem('cup_master_rows', JSON.stringify(rows));
                 
                 const headers = rows[0].map(h => String(h).trim());
                 
+                // 2. 自動嘗試解析成盤點資料庫
                 let idIdx = headers.indexOf('商品碼');
                 if (idIdx === -1) idIdx = headers.indexOf('品號');
                 let barcodeIdx = headers.indexOf('條碼');
@@ -374,7 +361,7 @@
                     validParsed = index.filter(i => i.barcode || i.id);
                     setMasterData(validParsed);
                     localStorage.setItem('cup_master_index', JSON.stringify(validParsed));
-                    syncMessage = `\n💡 系統已自動將此模板同步為「盤點掃描資料庫」(共 ${validParsed.length} 筆)！`;
+                    syncMessage = `\n💡 系統已自動將此模板同步為「盤點掃描資料庫」(共 ${validParsed.length} 筆)，您無需再上傳其他檔案！`;
                 }
                 
                 if (db) {
@@ -480,12 +467,6 @@
           </header>
 
           <section className="relative w-full min-h-[40vh] bg-black overflow-hidden border-b border-slate-900 shadow-xl flex items-center justify-center">
-              {isScanning && (
-                  <div className="absolute top-4 bg-black/60 text-white px-4 py-2 rounded-full text-xs z-[100] border border-slate-700 shadow-lg text-center backdrop-blur-md">
-                      📸 對準中線並保持 <b>10~15公分</b><br/>
-                      <span className="text-[10px] text-yellow-400">系統已開啟全格式強制解碼</span>
-                  </div>
-              )}
               <div id="reader" className="w-full h-full"></div>
               <div id="cam-gate" className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950">
                   <button onClick={startScanner} className="bg-yellow-500 text-black px-12 py-5 rounded-2xl font-black text-xl shadow-[0_0_30px_rgba(234,179,8,0.2)] active:scale-95 transition-all">📷 啟動掃描</button>
@@ -635,12 +616,18 @@
                     <h4 className="text-blue-500 font-bold mb-2">📥 1. 匯入 Excel 模板 (自動同步盤點庫)</h4>
                     <input type="file" accept=".xlsx, .xls, .csv" style={{ display: 'none' }} id="csv-template-file" onChange={handleImportTemplate} />
                     <button onClick={() => document.getElementById('csv-template-file').click()} className="bg-blue-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 Excel 模板檔</button>
+                    <p className="text-[10px] text-blue-400/70 mt-2 leading-snug">
+                        💡 上傳有「品號/物料/品名」的模板，系統會自動把它設定為掃描資料庫！
+                    </p>
                 </div>
 
                 <div className="bg-emerald-900/20 border border-emerald-500/30 p-6 rounded-[32px] mb-5">
                     <h4 className="text-emerald-500 font-bold mb-2">📥 2. 單獨覆蓋盤點資料庫 (選用)</h4>
                     <input type="file" accept=".xlsx, .xls, .csv" style={{ display: 'none' }} id="csv-db-file" onChange={handleImportSearchDB} />
                     <button onClick={() => document.getElementById('csv-db-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 Excel 資料庫</button>
+                    <p className="text-[10px] text-emerald-400/70 mt-2 leading-snug">
+                        如果您的掃描庫跟匯出模板不同，可以在這裡單獨上傳覆蓋。
+                    </p>
                 </div>
 
                 <button onClick={() => { if(confirm('⚠️ 確定清除所有設定？')){localStorage.clear();location.reload();} }} className="text-slate-600 text-xs font-bold py-4 mt-auto text-center w-full">重置系統核心快取</button>
@@ -688,12 +675,7 @@
     }
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
-    // 👑 將 App 包裝在防護罩內啟動
-    root.render(
-      <ErrorBoundary>
-        <App />
-      </ErrorBoundary>
-    );
+    root.render(<App />);
   </script>
 </body>
 </html>
