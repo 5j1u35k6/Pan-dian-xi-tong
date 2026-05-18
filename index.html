@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V8.3</title>
+  <title>CUPICHO PRO V8.4</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -42,7 +42,6 @@
     input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     
     #reader { width: 100%; display: flex; justify-content: center; overflow: hidden; position: relative; }
-    /* 畫面再放大一點點，幫助看清楚小條碼 */
     #reader video { width: 100% !important; object-fit: cover !important; transform: scale(1.3); }
   </style>
 </head>
@@ -79,13 +78,26 @@
 
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'cupicho-inventory';
 
+    // 👑 軍規級防呆讀取：即使快取壞掉也絕對不會白畫面
+    const safeParse = (key, fallback) => {
+        try {
+            const val = localStorage.getItem(key);
+            if (!val) return fallback;
+            const parsed = JSON.parse(val);
+            return (parsed !== null && parsed !== undefined) ? parsed : fallback;
+        } catch (e) {
+            console.error(`快取 ${key} 損毀，已自動修復`);
+            return fallback;
+        }
+    };
+
     function App() {
-      const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master_index')) || []);
-      const [masterRows, setMasterRows] = useState(() => JSON.parse(localStorage.getItem('cup_master_rows')) || []);
-      
-      const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
-      const [manualBinds, setManualBinds] = useState(() => JSON.parse(localStorage.getItem('cup_binds')) || {});
-      const [completedLocations, setCompletedLocations] = useState(() => JSON.parse(localStorage.getItem('cup_completed_locs')) || []);
+      // 狀態初始化加入強制型別確保
+      const [masterData, setMasterData] = useState(() => { const d = safeParse('cup_master_index', []); return Array.isArray(d) ? d : []; });
+      const [masterRows, setMasterRows] = useState(() => { const d = safeParse('cup_master_rows', []); return Array.isArray(d) ? d : []; });
+      const [inventory, setInventory] = useState(() => { const d = safeParse('cup_inv', []); return Array.isArray(d) ? d : []; });
+      const [manualBinds, setManualBinds] = useState(() => { const d = safeParse('cup_binds', {}); return (typeof d === 'object' && d !== null) ? d : {}; });
+      const [completedLocations, setCompletedLocations] = useState(() => { const d = safeParse('cup_completed_locs', []); return Array.isArray(d) ? d : []; });
       
       const [currentLocation, setCurrentLocation] = useState(LOCATIONS[0]);      
       const [scannedBarcode, setScannedBarcode] = useState('');
@@ -109,46 +121,56 @@
         dataRef.current = { masterData, manualBinds, inventory, currentLocation }; 
       }, [masterData, manualBinds, inventory, currentLocation]);
 
+      // 監聽雲端庫存 (防護版)
       useEffect(() => {
         if (!db) return;
         const unsubscribe = db.collection('artifacts').doc(appId).collection('public').doc('inventory_sessions').onSnapshot((doc) => {
             if (doc.exists) {
-                const cloudData = doc.data().items || [];
-                setInventory(cloudData);
-                localStorage.setItem('cup_inv', JSON.stringify(cloudData));
+                const cloudData = doc.data().items;
+                const safeData = Array.isArray(cloudData) ? cloudData : [];
+                setInventory(safeData);
+                localStorage.setItem('cup_inv', JSON.stringify(safeData));
             }
         }, (error) => console.error("Firestore Listen Error:", error));
         return () => unsubscribe();
       }, []);
 
+      // 監聽雲端主檔 (防護版)
       useEffect(() => {
         if (!db) return;
         const unsubscribeMaster = db.collection('artifacts').doc(appId).collection('public').doc('master_full').onSnapshot((doc) => {
             if (doc.exists) {
                 const data = doc.data();
                 if(data.index) {
-                    const parsedIndex = JSON.parse(data.index);
-                    setMasterData(parsedIndex);
-                    localStorage.setItem('cup_master_index', JSON.stringify(parsedIndex));
+                    try {
+                        const parsedIndex = JSON.parse(data.index);
+                        const safeIndex = Array.isArray(parsedIndex) ? parsedIndex : [];
+                        setMasterData(safeIndex);
+                        localStorage.setItem('cup_master_index', JSON.stringify(safeIndex));
+                    } catch(e){}
                 }
                 if(data.template) {
-                    const parsedRows = JSON.parse(data.template);
-                    setMasterRows(parsedRows);
-                    localStorage.setItem('cup_master_rows', JSON.stringify(parsedRows));
+                    try {
+                        const parsedRows = JSON.parse(data.template);
+                        const safeRows = Array.isArray(parsedRows) ? parsedRows : [];
+                        setMasterRows(safeRows);
+                        localStorage.setItem('cup_master_rows', JSON.stringify(safeRows));
+                    } catch(e){}
                 }
             }
         }, (error) => console.error("Firestore Master Listen Error:", error));
         return () => unsubscribeMaster();
       }, []);
 
-      useEffect(() => { localStorage.setItem('cup_completed_locs', JSON.stringify(completedLocations)); }, [completedLocations]);
+      useEffect(() => { localStorage.setItem('cup_completed_locs', JSON.stringify(completedLocations || [])); }, [completedLocations]);
 
       const saveInventory = (newInv) => {
-        setInventory(newInv);
-        localStorage.setItem('cup_inv', JSON.stringify(newInv));
+        const safeInv = Array.isArray(newInv) ? newInv : [];
+        setInventory(safeInv);
+        localStorage.setItem('cup_inv', JSON.stringify(safeInv));
         if (db) {
             db.collection('artifacts').doc(appId).collection('public').doc('inventory_sessions').set({ 
-                items: newInv, 
+                items: safeInv, 
                 lastUpdated: firebase.firestore.FieldValue.serverTimestamp() 
             }).catch(e => console.error("雲端同步失敗", e));
         }
@@ -168,31 +190,18 @@
 
         try {
           await scannerRef.current.start(
-            // 👑 強制啟動連續對焦 (適用於部分 Android 手機)
-            { facingMode: "environment", advanced: [{ focusMode: "continuous" }] },
+            // 移除 advanced focusMode 以避免 iOS Safari 發生崩潰白屏
+            { facingMode: "environment" },
             { 
-              fps: 15, // 提高偵測幀率，捕捉瞬間清晰畫面
-              // 👑 縮小掃描框高度，強迫將運算力集中在畫面中間，針對長條形條碼
+              fps: 15, 
               qrbox: (viewfinderWidth, viewfinderHeight) => ({ width: Math.floor(viewfinderWidth * 0.8), height: 180 }),
-              // 👑 殺手級功能：啟用手機原生硬體掃描 API (極大提升 iOS 17 與現代 Android 效能)
-              experimentalFeatures: {
-                  useBarCodeDetectorIfSupported: true
-              },
+              experimentalFeatures: { useBarCodeDetectorIfSupported: true }, // 依然保留硬體解碼加速
               formatsToSupport: [
-                  Html5QrcodeSupportedFormats.CODE_39, 
-                  Html5QrcodeSupportedFormats.CODE_128,
-                  Html5QrcodeSupportedFormats.EAN_13, 
-                  Html5QrcodeSupportedFormats.EAN_8,
-                  // 👑 擴增支援歐美 UPC 條碼
-                  Html5QrcodeSupportedFormats.UPC_A,
-                  Html5QrcodeSupportedFormats.UPC_E,
+                  Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.CODE_128,
+                  Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
+                  Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
                   Html5QrcodeSupportedFormats.QR_CODE
-              ],
-              videoConstraints: { 
-                facingMode: "environment", 
-                width: { ideal: 1920 }, 
-                height: { ideal: 1080 } 
-              } 
+              ]
             },
             (decodedText) => { 
               const f = document.getElementById('flash-overlay'); 
@@ -203,7 +212,8 @@
               setScannedBarcode(code);
               
               const { masterData, manualBinds } = dataRef.current;
-              const found = masterData.find(m => m.barcode === code || m.id === code) || manualBinds[code];
+              const safeMaster = Array.isArray(masterData) ? masterData : [];
+              const found = safeMaster.find(m => m.barcode === code || m.id === code) || manualBinds[code];
               setCurrentItem(found || null);
               setQty('');
               
@@ -229,17 +239,18 @@
           setScannedBarcode(text);
           const cleanText = text.trim();
           
-          const exactMatch = masterData.find(m => m.barcode === cleanText || m.id === cleanText) || manualBinds[cleanText];
+          const safeMaster = Array.isArray(masterData) ? masterData : [];
+          const exactMatch = safeMaster.find(m => m.barcode === cleanText || m.id === cleanText) || manualBinds[cleanText];
           if (exactMatch) {
               setCurrentItem(exactMatch);
               setNameSearchResults([]); 
           } else {
               setCurrentItem(null);
               if (cleanText.length > 0) {
-                  const results = masterData.filter(m => 
-                      m.name.toLowerCase().includes(cleanText.toLowerCase()) || 
-                      m.barcode.includes(cleanText) ||
-                      m.id.includes(cleanText)
+                  const results = safeMaster.filter(m => 
+                      (m.name && m.name.toLowerCase().includes(cleanText.toLowerCase())) || 
+                      (m.barcode && m.barcode.includes(cleanText)) ||
+                      (m.id && m.id.includes(cleanText))
                   ).slice(0, 15);
                   setNameSearchResults(results);
               } else {
@@ -255,8 +266,9 @@
         if (isNaN(parsedQty) || parsedQty <= 0) return alert("請輸入有效的數量！");
         
         const item = currentItem || { id: "NEW", name: "未知商品" };
-        const existingIdx = inventory.findIndex(i => i.barcode === scannedBarcode && i.location === currentLocation);
-        let newInv = [...inventory];
+        const safeInv = Array.isArray(inventory) ? inventory : [];
+        const existingIdx = safeInv.findIndex(i => i.barcode === scannedBarcode && i.location === currentLocation);
+        let newInv = [...safeInv];
 
         if (existingIdx > -1) {
             newInv[existingIdx].qty += parsedQty;
@@ -358,7 +370,7 @@
                     validParsed = index.filter(i => i.barcode || i.id);
                     setMasterData(validParsed);
                     localStorage.setItem('cup_master_index', JSON.stringify(validParsed));
-                    syncMessage = `\n💡 系統已自動將此模板同步為「盤點掃描資料庫」(共 ${validParsed.length} 筆)，您無需再上傳其他檔案！`;
+                    syncMessage = `\n💡 系統已自動將此模板同步為「盤點掃描資料庫」(共 ${validParsed.length} 筆)！`;
                 }
                 
                 if (db) {
@@ -376,10 +388,13 @@
       };
 
       const handleExportERP = () => {
-          if (masterRows.length === 0) return alert("請先匯入 Excel 模板底圖！");
-          if (inventory.length === 0) return alert("目前沒有盤點資料！");
+          const safeRows = Array.isArray(masterRows) ? masterRows : [];
+          const safeInv = Array.isArray(inventory) ? inventory : [];
 
-          let outputRows = JSON.parse(JSON.stringify(masterRows));
+          if (safeRows.length === 0) return alert("請先匯入 Excel 模板底圖！");
+          if (safeInv.length === 0) return alert("目前沒有盤點資料！");
+
+          let outputRows = JSON.parse(JSON.stringify(safeRows));
           const headers = outputRows[0].map(h => String(h).trim());
           
           let stockIdx = headers.indexOf('門市庫存');
@@ -392,7 +407,7 @@
           const idIdx1 = headers.indexOf('品號');
           const idIdx2 = headers.lastIndexOf('品號');
 
-          let remainingInv = [...inventory];
+          let remainingInv = [...safeInv];
 
           for(let i=1; i<outputRows.length; i++){
               const row = outputRows[i];
@@ -412,32 +427,4 @@
                   const matchId2 = (tId2 && tId2 !== '0' && (invId === tId2 || invBarcode === tId2));
                   
                   if (matchBarcode || matchId1 || matchId2) {
-                      rowTotalQty += parseInt(invItem.qty, 10) || 0;
-                      return false; 
-                  }
-                  return true; 
-              });
-
-              if (rowTotalQty > 0) row[stockIdx] = rowTotalQty;
-              else row[stockIdx] = '';
-          }
-
-          const ws = XLSX.utils.aoa_to_sheet(outputRows);
-          const wb = XLSX.utils.book_new();
-          XLSX.utils.book_append_sheet(wb, ws, "盤點總表");
-          XLSX.writeFile(wb, `門市庫存_盤點總表_${new Date().toISOString().slice(0,10)}.xlsx`);
-      };
-
-      const handleExportDetails = () => {
-          if (inventory.length === 0) return alert("目前沒有盤點資料可以匯出！");
-          const detailRows = [["場域", "商品碼/品號", "商品名稱", "條碼/物料", "數量", "盤點時間"]];
-          
-          inventory.forEach(i => {
-              detailRows.push([
-                  i.location,
-                  i.id !== 'NEW' ? i.id : '',
-                  i.name,
-                  i.barcode,
-                  i.qty,
-                  i.time
-            
+                      rowTotalQty += parseInt(inv
