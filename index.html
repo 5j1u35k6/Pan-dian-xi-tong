@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V8.5</title>
+  <title>CUPICHO PRO V8.6</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -51,6 +51,7 @@
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
 
+    // 🛡️ 防白畫面機制：安全讀取快取，避免損壞的資料讓網頁崩潰
     const safeGetItem = (key, defaultVal) => {
         try {
             const item = localStorage.getItem(key);
@@ -90,7 +91,6 @@
     const appId = typeof __app_id !== 'undefined' ? __app_id : 'cupicho-inventory';
 
     function App() {
-      // 💯 完全還原 8.2 的介面狀態，並加上防護盾
       const [masterData, setMasterData] = useState(() => safeGetItem('cup_master_index', []));
       const [masterRows, setMasterRows] = useState(() => safeGetItem('cup_master_rows', []));
       const [inventory, setInventory] = useState(() => safeGetItem('cup_inv', []));
@@ -180,15 +180,14 @@
           await scannerRef.current.start(
             { facingMode: "environment" },
             { 
-              fps: 15, // 提高偵測頻率
-              // 🚀 隱藏升級：壓扁掃描框高度至150，逼迫相機運算力集中於細長的化妝品條碼
-              qrbox: (viewfinderWidth, viewfinderHeight) => ({ width: Math.floor(viewfinderWidth * 0.85), height: 150 }),
-              // 🚀 隱藏升級：啟動手機硬體 AI 加速辨識引擎
-              experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+              fps: 15, // 保持高幀率偵測
+              // 👑 恢復早期版本的大視窗 (height: 250)，讓一般條碼更容易且快速地進入掃描區域
+              qrbox: (viewfinderWidth, viewfinderHeight) => ({ width: Math.floor(viewfinderWidth * 0.85), height: 250 }),
+              
+              experimentalFeatures: { useBarCodeDetectorIfSupported: true }, // 保留硬體加速
               formatsToSupport: [
                   Html5QrcodeSupportedFormats.CODE_39, Html5QrcodeSupportedFormats.CODE_128,
                   Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8,
-                  // 🚀 隱藏升級：加入歐美特規 UPC 格式，防止漏網之魚
                   Html5QrcodeSupportedFormats.UPC_A, Html5QrcodeSupportedFormats.UPC_E,
                   Html5QrcodeSupportedFormats.QR_CODE
               ],
